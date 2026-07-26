@@ -1,0 +1,20 @@
+[project]
+name = "locali"
+version = "0.1.0"
+description = "Run a MoE model whose expert weights do not fit in RAM: experts stream from disk under a hard byte ceiling."
+requires-python = "==3.12.*"
+dependencies = [
+    "mlx",
+    "mlx-lm",
+    "numpy",
+    "psutil",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,5 @@
+Write a Python function `is_balanced(s: str) -> bool` that checks whether the parentheses, brackets, and braces in a string are balanced and correctly nested. Include a brief docstring and two example calls.
+---
+A farmer has 17 sheep. All but 9 die. How many sheep does the farmer have left? Explain your reasoning step by step, then give the final answer.
+---
+Hey, what's a good one-sentence explanation of why the sky is blue?
