@@ -107,3 +107,59 @@ def test_active_memory_delta_stays_bounded_across_many_evictions():
         )
     finally:
         store.close()
+
+
+def test_prefetch_is_refused_where_it_cannot_help():
+    """With per-layer LRU pools nothing evicts layer L's entries between two
+    visits to layer L, so last token's set is still resident and prefetching it
+    reads bytes that are never used. Refuse rather than burn bandwidth."""
+    with pytest.raises(ValueError, match="only helps with cache_enabled=False"):
+        ExpertStore(IDX_PATH, BIN_PATH, ceiling_gb=_ceiling_for(8),
+                    cache_enabled=True, prefetch_layers=4)
+
+
+def test_prefetch_bytes_are_reported_not_hidden():
+    store = ExpertStore(IDX_PATH, BIN_PATH, cache_enabled=False, wave_slots=8,
+                        prefetch_layers=4)
+    try:
+        assert store.prefetch_budget_bytes == 4 * 8 * store.bytes_per_expert
+        assert store.total_resident_bytes == store.resident_bytes + store.prefetch_budget_bytes
+    finally:
+        store.close()
+
+
+def test_prefetch_does_not_change_slot_mapping():
+    """A prefetched read is the same read the wave would issue; only its timing
+    differs. The same access sequence must give the same slots either way."""
+    rng = random.Random(7)
+    plain = ExpertStore(IDX_PATH, BIN_PATH, cache_enabled=False, wave_slots=8)
+    pre = ExpertStore(IDX_PATH, BIN_PATH, cache_enabled=False, wave_slots=8,
+                      prefetch_layers=3)
+    try:
+        # Model DECODE: layers visited in order once per token, consecutive
+        # tokens routing to mostly the same experts. That correlation is the
+        # whole basis of prefetching last token's set.
+        layers = plain.layer_ids[:8]
+        n_exp = plain.num_experts
+        cur = {l: sorted(rng.sample(range(n_exp), 6)) for l in layers}
+        calls = []
+        for _token in range(6):
+            for l in layers:
+                ids = list(cur[l])
+                ids[rng.randrange(len(ids))] = rng.randrange(n_exp)
+                cur[l] = sorted(set(ids))
+                calls.append((l, cur[l]))
+        seq = []
+        for store in (plain, pre):
+            out = []
+            for layer, ids in calls:
+                out.append(store.translate(layer, ids))
+                if store.prefetch_layers:
+                    store.drop_stale_prefetch(layer)
+                    store.prefetch_ahead(layer)
+            seq.append(out)
+        assert seq[0] == seq[1], "prefetch changed slot assignment"
+        assert pre.prefetch_used > 0, "prefetch never hit -- test proves nothing"
+    finally:
+        plain.close()
+        pre.close()

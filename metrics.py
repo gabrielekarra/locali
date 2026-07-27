@@ -28,8 +28,23 @@ def build_metrics_report(store: ExpertStore, ceiling_gb: float | None) -> dict:
         "bytes_read_cold_gb": store.bytes_read_cold / 1e9,
         "resident_bytes": store.resident_bytes,
         "resident_gb": store.resident_bytes / 1e9,
+        "prefetch_reserve_gb": store.prefetch_budget_bytes / 1e9,
+        "total_resident_gb": store.total_resident_bytes / 1e9,
         "ceiling_gb": ceiling_gb,
-        "ceiling_held": ceiling_gb is None or store.resident_bytes <= ceiling_gb * 1e9,
+        # Prefetch holds bytes too; checking pools alone would report a ceiling
+        # as held while the process sat above it.
+        "ceiling_held": ceiling_gb is None or store.total_resident_bytes <= ceiling_gb * 1e9,
+        "prefetch_layers": store.prefetch_layers,
+        "prefetch_used": store.prefetch_used,
+        "prefetch_wasted": store.prefetch_wasted,
+        # A wrong guess still costs a disk read, and bytes_read_cold only counts
+        # bytes that reached a slot. Reporting cold bytes alone would understate
+        # real traffic by the whole wasted fraction.
+        "prefetch_wasted_gb": store.prefetch_wasted * store.bytes_per_expert / 1e9,
+        "prefetch_accuracy": (store.prefetch_used / (store.prefetch_used + store.prefetch_wasted)
+                              if store.prefetch_used + store.prefetch_wasted else 0.0),
+        "disk_bytes_total_gb": (store.bytes_read_cold
+                                + store.prefetch_wasted * store.bytes_per_expert) / 1e9,
         "layer_hit_rates": store.layer_hit_rates(),
         "vmem_percent": psutil.virtual_memory().percent,
     }

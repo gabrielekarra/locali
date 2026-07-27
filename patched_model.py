@@ -174,6 +174,13 @@ def _make_patched_switch_glu_class(layer_idx: int, store: ExpertStore, class_glu
             tt = time.perf_counter()
             slot_ids_flat = store.translate(layer_idx, flat_ids)
             store.t_translate += time.perf_counter() - tt
+            # Guesses for this layer and earlier are settled now -- drop the
+            # wrong ones before issuing more, so in-flight bytes stay inside
+            # the reserved budget. Then start the next layers' reads: they run
+            # while this layer's gather computes.
+            if store.prefetch_layers:
+                store.drop_stale_prefetch(layer_idx)
+                store.prefetch_ahead(layer_idx)
             slot_indices = mx.array(slot_ids_flat, dtype=mx.uint32).reshape(indices.shape)
             if not store.profile:
                 return super().__call__(x, slot_indices)

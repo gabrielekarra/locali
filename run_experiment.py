@@ -194,6 +194,7 @@ def run_verify(args: argparse.Namespace) -> dict:
         log_routing=args.log_routing,
         wave_slots=args.wave_slots,
         no_page_cache=args.no_page_cache,
+        prefetch_layers=args.prefetch_layers,
     )
 
     print(f"Loading model {args.model} (streaming -- experts never materialized) ...")
@@ -295,6 +296,12 @@ def main():
         help="--verify only: no cache, ONE shared pool of N slots for the whole model "
              "(N >= top_k). For ceilings so far below the model that hit rate is ~0 "
              "anyway and per-layer pools cost more RAM than the machine has.",
+    )
+    parser.add_argument(
+        "--prefetch-layers", type=int, default=0,
+        help="--verify only: while a layer computes, start reading what the next "
+             "N layers used at the PREVIOUS decode step. Its bytes are reserved "
+             "out of --ceiling-gb, not added to it. 0 disables.",
     )
     parser.add_argument(
         "--no-page-cache", action="store_true",
