@@ -37,6 +37,12 @@ M4, 24 GB, internal SSD. 3 prompts x 40 tokens, temperature 0.
 All five produce **byte-identical output** at 4-bit. The 3-bit pack is a
 quality change and is measured separately below.
 
+**Read these as 40-token numbers.** GLM-4.5-Air is a reasoning model that has
+not left its `<think>` block by token 40, and generation length moves the
+result in *opposite directions* per mode: at 600 tokens wave drops to 0.691
+while the 6.0 GB LRU rises to 1.0, because expert-major prefill is cheaper per
+token than decode and a warm cache needs length to pay off. See `NOTES.md`.
+
 The striking row is the last one against the third: **shrinking the experts
 beats caching them.** 3-bit at 4.56 GB is faster than 4-bit with a 7.5 GB
 cache at 11.75 GB — 2.6x less RAM for 12% more speed. On a machine where the
@@ -112,6 +118,18 @@ uv run python run_experiment.py --verify --reference --wave-slots 16 --log-routi
 uv run python requantize_experts.py --hot-n 16 --cold-bits 3 --out-suffix _mixed3b
 uv run python run_experiment.py --verify --reference --wave-slots 16 --pack _mixed3b
 ```
+
+Experimental, off by default -- start reads for the next layers' previous-step
+experts while a layer computes:
+
+```sh
+uv run python run_experiment.py --verify --reference --wave-slots 16 --prefetch-layers 4
+```
+
+Measured +10.2% at 120 tokens and **-15% at 600**, at 37% guess accuracy, with
+a thermal confound not excluded. Not validated; see `NOTES.md` before trusting
+it. It is refused with `--ceiling-gb`, where per-layer pools make it a no-op by
+construction.
 
 Results land in `results/` with a timestamp; nothing is overwritten.
 

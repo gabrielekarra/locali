@@ -153,3 +153,118 @@ of rebuilding it to re-run a check.
 - Speculative prefetch (predict layer L+1's experts from layer L's hidden
   state) is the only remaining path past ~1.1 tok/s at 4-bit.
 - 10 PPL windows is thin. 40 would take ~30 minutes per pack.
+
+## Second session: prefetch, and a measurement protocol that was lying
+
+### A full answer, finally
+
+Every number above is from 40-token runs. GLM-4.5-Air is a reasoning model:
+at 40 tokens it has not left the `<think>` block, so the whole curve was
+measured on three truncated openings of a reasoning trace. First complete
+run: 600 tokens, `--ceiling-gb 6.0`, one prompt.
+
+| | |
+|---|---|
+| 600 tokens | 575.6 s = **1.0 tok/s** |
+| peak | 10.00 GB, ceiling held (5.693 GB resident) |
+| hit rate | 41.2% |
+| cold read | 1260.4 GB |
+
+It answers the "17 sheep, all but 9 die" trick correctly (9), checks itself
+against a smaller case, and explicitly names the misreading it is avoiding.
+At 600 tokens it is still inside `<think>` and never emits a final answer
+outside it; that needs ~1000-1500 tokens.
+
+### Generation length changes the answer, in both directions
+
+| config | 40 tokens | 600 tokens |
+|---|---|---|
+| wave 16 | 0.754 | **0.691** |
+| LRU 6.0 GB | ~0.80 (interpolated) | **1.0** |
+
+Opposite signs. Expert-major prefill reads each expert once per layer, so it
+is *cheaper per token* than decode; at 40 tokens it is a large share of the
+average and flatters wave mode. The LRU instead gets better with length as
+the cache warms. **A 40-token protocol is not a constant bias, it distorts
+per mode**, which is worse. The tables above are 40-token numbers and should
+be read as such until the curve is re-run at 600.
+
+### Profile of the regime that matters
+
+Warm cache, 100 tokens, 40% hit, `store.profile = True`:
+
+| bucket | s of 113 | share |
+|---|---|---|
+| `t_fetch` | 81.9 | 72% |
+| `t_gather` | 18.2 | 16% |
+| `t_sync` | 10.8 | 9.5% |
+| `t_eval` | 1.4 | 1.3% |
+
+234.3 GB in 81.9 s = **2.86 GB/s**, against 4.06 GB/s measured in the 0%-hit
+wave regime and a 3.95 GB/s benchmark. The disk did not get slower: the
+batches did. At 0% hit every layer asks for 8 experts and fills 8 reader
+threads; at 40% it asks for ~4.8 and three threads idle. **The cache sabotages
+its own read throughput** -- 22.6 s of the 113, purely to shallow queues.
+
+### Prefetch: not validated
+
+While a layer computes, start reading what the next N layers used at the
+previous decode step. Two measurements, same config, different length:
+
+| | 120 tokens | 600 tokens |
+|---|---|---|
+| wave 16 | 0.793 | 0.691 |
+| wave 16 + prefetch 4 | **0.874** (+10.2%) | **0.587** (−15%) |
+
+Accuracy 37%: 15798 guesses used, 26843 discarded. Wrong guesses still cost a
+read, so real traffic is ~721 GB against the 460.6 GB `bytes_read_cold`
+reports -- 57% more bytes for, at best, 10% more speed. At 600 tokens that
+extra traffic appears to cost more than it buys.
+
+Confound not excluded: the 600-token pair ran back to back in one sweep, the
+prefetch run second, on a fanless machine. Thermal accumulation would produce
+the same sign. **The feature stays off by default and the +10.2% claim in its
+commit message is not reproduced at realistic length.** Settling it needs both
+runs cold, in randomised order.
+
+### Where prefetch cannot work, proven
+
+With per-layer LRU pools nothing evicts layer L's entries between two visits
+to layer L -- its pool is touched only by layer L. So R_t is still resident at
+token t+1, misses are R_{t+1} \ R_t, and prefetching R_t reads bytes that are
+never wanted. The constructor now raises instead. Found by a test asserting
+`prefetch_used > 0`, which failed for three different reasons in a row (cache
+too large to evict, working set larger than the pool, random access order
+instead of decode order) before the real one surfaced.
+
+### Out of reach, with numbers
+
+Kimi K3 shipped 2026-07-27: 1560.9 GB, 93 layers (92 MoE), 896 experts,
+top-16, native mxfp4, `kimi_linear` attention with 24 of 93 layers full.
+
+| | per expert | floor/token | core |
+|---|---|---|---|
+| GLM-4.5-Air (runs) | 9.73 MB | 3.50 GB | 4.0 GB |
+| GLM-5.2 | 21.2 MB | 12.7 GB | 10.6 GB |
+| Kimi K3 | 17.55 MB | **25.8 GB** | ~114 GB (by subtraction, unverified) |
+
+At 3.95 GB/s K3 is 0.15 tok/s, but the floor is not what kills it -- the core
+is. Streaming never touches the core, and it grows with the model. Going
+bigger makes the one number that decides feasibility worse.
+
+There is no "K3 Air": Air is Zhipu's naming, not Moonshot's. "K3 Fast" is a
+serving tier on the same weights, not a checkpoint. The streamable member of
+that family already exists: `Kimi-Linear-48B-A3B-Instruct`, 27.6 GB, 1.14 GB
+core.
+
+### The honest position on what this is for
+
+On 16 GB every model this engine runs, `llama.cpp` with mmap also runs. What
+it does that mmap cannot: a hard, known-in-advance RAM ceiling, and
+mixed-precision per-expert packs. The page-cache measurement sizes the gap --
+the OS contributed +10.9% with no cache of ours and +2.1% with one. Automatic
+residency is a decent uncontrolled cache, not a substitute for a bound.
+
+The experiment that would settle whether this is necessary has not been run:
+this engine at a fixed ceiling against llama.cpp mmap, same machine, other
+apps open. Until then "does this need to exist" has no data behind it.
