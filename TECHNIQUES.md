@@ -1,7 +1,7 @@
 # Three techniques the offloading literature does not have
 
-All expert-offloading work surveyed in `K3-DESIGN.md` §3 shares one assumption,
-stated plainly in the survey literature:
+Every expert-offloading system in the literature shares one assumption, stated
+plainly in the survey work:
 
 > "Expert weights are paged at expert granularity, and an entire expert's
 > parameters must be resident in GPU memory before its feed-forward computation
@@ -164,9 +164,9 @@ degradation with depth continues, the whole-model number will be below 1.4x.
 ## B. Fractional residency
 
 Expert-granular caching is binary, and that produces the hard floor measured in
-this repo: below `top-k` slots per layer the hit rate is **zero** (Qwen3-Next,
-top-10: 4.1% at 8 slots, 41.9% at 15). Kimi K3 sits far below that floor, which
-is why every cache policy in the literature evaluates to a no-op there.
+this repo by reuse distance: below `top-k` slots per layer the hit rate is
+**zero** (4.1% at 8 slots against top-10, 41.9% at 15). Models sparse enough to
+sit below that floor make every cache policy in the literature a no-op.
 
 Neuron granularity dissolves the floor: instead of *some* experts fully resident,
 keep the **top-p neurons of every expert** resident and stream the tail. Residency
@@ -177,8 +177,8 @@ Honest accounting, because this is weaker than it first looks:
 - **MiniMax-M2.5**: LRU already reaches ~76% hit. Fractional residency alone is
   *worse* (p=256 → 11.7 GB resident, 1.83 GB/token cold vs LRU's 0.53). Temporal
   locality beats uniform spreading whenever locality exists.
-- **Kimi K3**: 19.3 GB buys only 70 of 3072 neurons per expert — a 2.3% byte
-  saving. Also not a win on bytes.
+- **A model sparse enough to need it**: at the scale where LRU fails, 19.3 GB
+  buys ~2% of each expert's neurons — also not a win on bytes.
 
 So B does **not** pay as a bandwidth trick. What it buys is a **graceful
 degradation dial where none exists**: with LRU at 0% hit the only options are

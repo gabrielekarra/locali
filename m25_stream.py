@@ -2,7 +2,8 @@
 
 The dense part of M2.5 is 4.04B params -- 2.3 GB at 4-bit -- so it stays
 resident and only the routed experts stream. That ratio is the entire reason
-this model was chosen over Kimi K3, whose dense part alone does not fit.
+this model was chosen: a MoE whose always-on weights do not fit leaves no room
+for a cache, and then none of this works.
 
 Two things force a per-expert path rather than mlx_lm's stacked `gather_qmm`:
 
@@ -83,8 +84,7 @@ def resident_same_path(blk, x, inds, gates, bits=4):
     mlx_lm's blk(x) would not: that path is gather_qmm on packed weights, a
     genuinely different computation from dequantize-then-matmul, so it differs
     by ~1e-2 no matter how correct the fetch is -- and a tolerance wide enough
-    to pass it would hide exactly the indexing bugs this check exists to catch
-    (the lesson recorded in 8c58570).
+    to pass it would hide exactly the indexing bugs this check exists to catch.
     """
     sm = blk.switch_mlp
     dq = lambda m, i: mx.dequantize(m.weight[i], m.scales[i], m.biases[i],

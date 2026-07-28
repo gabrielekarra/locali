@@ -1,9 +1,9 @@
 """Expert index that POINTS INTO the safetensors shards instead of copying them.
 
-Commit 5cad898 recorded that the Qwen export wasted 58 GB by copying expert
-weights into experts.bin when the HF snapshot already held them, and flagged
-this as the thing to fix before the next model. This is the fix, and at M2.5
-scale it is not optional: a copied mixed pack would be ~84 GB against 49 GB free.
+An earlier export in this repo wasted 58 GB by copying expert weights into a
+pack file when the snapshot already held them. This is the fix, and at M2.5
+scale it is not optional: a copied mixed pack would be ~84 GB against 49 GB
+free.
 
 A safetensors file is a JSON header then a flat data blob, and the stacked
 switch_mlp tensors have experts on axis 0, so expert e of a [E, out, in] tensor

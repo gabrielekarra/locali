@@ -2,53 +2,62 @@
 
 ## What this is
 
-Run a MoE model whose routed-expert weights exceed RAM. Experts stay on disk
-and are read on demand into a small resident pool. Validated on
-GLM-4.5-Air (106B, 60.1 GB checkpoint, runs in 4.45 GB). See `README.md` for
-the design and `NOTES.md` for every measured number.
+Run a MoE model whose routed-expert weights exceed RAM. Experts stay on disk and
+are read on demand into a cache with a hard byte ceiling; only the dense
+backbone stays resident. Target is **MiniMax-M2.5** (229B, 128.7 GB at 4-bit,
+runs with a 2.74 GB resident core on a 24 GB Mac). `README.md` has the design,
+`TECHNIQUES.md` the techniques and the measurements behind them.
 
 ## Hard rules
 
-- **The ceiling is a hard invariant.** Pools are fixed-size at construction
-  and every write is an in-place slot update, so resident bytes cannot grow.
-  A property test asserts it under random access. Keep it that way.
-- **Never mmap the expert file and let the OS manage residency.** We manage
-  it, with explicit `os.pread` into buffers we own. `--no-page-cache` exists
-  so the OS buffer cache cannot silently become a second, unaccounted tier —
-  use it for any number meant to predict a model larger than RAM.
-- **No silent fallbacks.** A short read, a missing tensor, a call whose
-  working set exceeds the pool: crash with a message naming the fix.
-- **Correctness before speed.** Any change to the residency path must leave
-  token streams byte-identical across residency modes. Check it before
-  reporting a speedup.
-- **Measure before optimizing, and re-measure after.** The store carries
-  `t_fetch/t_write/t_eval/t_sync/t_gather` counters for this. Note that
-  `store.profile = True` forces evals that serialise the pipeline — a
-  profiled run is not the run you are shipping.
-- **Nothing model-specific in tests.** Derive sizes from the indexed model's
-  geometry. Hardcoded ceilings tuned to one model silently stop testing
-  anything on another.
+- **The ceiling is a hard invariant.** Evict *before* inserting, never after —
+  trimming afterwards leaves a window where residency exceeds the ceiling, which
+  is the whole thing. `m25_store.py`'s self-check asserts it under an access
+  pattern designed to thrash.
+- **Never mmap the weights and let the OS manage residency.** We manage it, with
+  explicit `os.pread` into buffers we own, and `F_NOCACHE` so the unified buffer
+  cache cannot become a second unaccounted tier and make the metrics lie.
+- **Never call `mlx_lm.load` on these checkpoints.** 128.7 GB into 24 GB of RAM
+  takes the machine down; it has happened. Build only the layers you need, or
+  tear the expert modules out before anything materialises them, then assert on
+  process RSS rather than trusting that the arrays stayed lazy.
+- **One model-loading process at a time.** Sequential, foreground preferred.
+- **No silent fallbacks.** A short read, a missing tensor, a working set larger
+  than the ceiling: crash with a message naming the fix.
+- **Correctness before speed, and compare through the same math path.** Checking
+  a streamed block against `gather_qmm` sits at ~1e-2 no matter how correct the
+  fetch is, because packed-weight matmul and dequantize-then-matmul are
+  different computations — and a tolerance wide enough to pass that hides
+  exactly the indexing bugs the check exists to catch. Hold the arithmetic
+  fixed so the only variable is the indirection, then demand `0.000e+00`.
+- **Measure before optimizing.** Three costs, not one: `t_io` (cold bytes /
+  disk), `t_ram` (active bytes / memory bus — a floor no cache moves), `t_over`
+  (implementation). Leaving out `t_ram` once predicted 43 tok/s for a run that
+  measured 5.2.
+- **Index, don't copy.** Experts are addressed as `(shard, offset)` into the
+  original safetensors. A copied mixed-precision pack would be 84 GB.
 - Dependencies: mlx, mlx-lm, numpy, psutil. Ask before adding.
-- Results go to `results/` with a timestamp; never overwrite a previous run.
-  Two fixed-path writers (`--log-routing`, `score_perplexity.py`) violate this
-  and have already destroyed data — fix them before reusing them on a new model.
+- Results go to `results/`; never overwrite a previous run. Fixed-path writers
+  have already destroyed data once.
 
 ## macOS / Apple Silicon
 
-- Reader threads cap at 8; measured throughput is flat from 8 to 24.
-- Watch memory pressure. `run_experiment.py` refuses to start without headroom
-  and caps MLX's allocation, because a failed run once took the machine down.
-- Model files and indexes live under `models/`, gitignored.
+- Reader threads cap at 8; measured throughput is flat from 8 upward.
+- Disk bandwidth depends on block size: 4.00 GB/s at 4.42 MB, 4.66 at 17.5 MB.
+  Measure with `bw.py` against a file **larger than RAM** — a 8 GB file reported
+  a fictional 14.7 GB/s because the page cache served it.
+- The memory bus is 120 GB/s on M4 base. Published 30+ tok/s results on 128 GB
+  Macs run at 400 GB/s with the model fully resident; not comparable.
+- Weights and indexes live under `models/`, gitignored.
 
-## Adding a model
+## What decides feasibility, before downloading anything
 
-Works on any checkpoint whose routed experts are stacked per layer under
-`layer.mlp.switch_mlp` with affine quantization — GLM, Qwen3-MoE, Qwen3-Next.
-`index_inplace.py` will refuse loudly otherwise.
+Two numbers: the **dense core** (total params minus routed-expert params — it
+can never be streamed) and **bytes per expert** (which sets how many slots a GB
+of cache buys). The per-token floor is `moe_layers × top_k × bytes_per_expert`.
 
-Two numbers decide feasibility before downloading anything: the **resident
-core** (repo bytes minus routed-expert bytes — it can never be streamed) and
-**bytes per expert** (which sets how many slots a GB of cache buys). The
-per-token floor is `moe_layers x top_k x bytes_per_expert`; if the cache is
-smaller than that, hit rate is ~0 by construction and only `--wave-slots`
-will run at all.
+The threshold that matters is **top-k**: if the cache holds fewer slots per layer
+than the router selects, the hit rate is zero by construction and no policy
+rescues it. M2.5 works here because it has no shared experts, so the dense core
+is 2.26 GB and the cache lands at 58 slots against top-8. `budget.py` computes
+all of this from a config.
