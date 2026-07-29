@@ -1,0 +1,10 @@
+dense core resident: 4.79 GB  (loaded in 1s)
+
+batch 512, prefill 4096 tokens in 369.4s (11.1 tok/s)
+  hit 85.8%  read 81.19 GB
+decode 2048 tokens (4 x 512) in 246.5s -> 8.31 tok/s aggregate, 0.02 per sequence
+  hit 0.0%  read 293.00 GB (0.143 GB/token)
+  evictions 69722  arena 2.50 GB  blocked on disk 110.4s of 615.9s
+  mlx active 4.79 GB
+  seq0: ' a single man in'
+  seq1: ' good fortune, etc'

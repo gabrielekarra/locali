@@ -485,6 +485,17 @@ unchunked read 0%. Bytes read are identical (292.98 GB against 293.22), so that
 is chunks re-requesting each other's experts and counting as hits, not reuse.
 The bytes are the honest number.
 
+Sweeping the knob at B=512 settles it — the two phases want opposite things:
+
+| chunk | prefill (4096 tok) | decode (512 wide) |
+|---|---|---|
+| none (serial) | 12.1 tok/s | **8.31** |
+| 512 | 11.1 | **8.31** (no chunking at T=512) |
+| 128 | **18.3** | 7.05 |
+
+Prefill wants it small and decode wants it off, so the engine sets it per phase
+rather than per run. One number could only ever have had one of the two.
+
 ## Open
 
 - The 58-slot design point (~16 GB ceiling) still has not been run: the guard
