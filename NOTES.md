@@ -191,10 +191,22 @@ GB, 5591 against 5592), which is the check that this changed only the fetch:
 same reads, issued differently.
 
 **2.93 GB/s, not the 4.00-4.66 `bw.py` reports.** That benchmark reads uniform
-4.42 MB blocks. An expert is nine reads — three weights of a few MB each and six
-scale/bias arrays of a few KB — so most of the queue is small reads that never
-reach streaming bandwidth. The remaining factor is in the block size, not in
-more threads.
+4.42 MB blocks. An expert is nine reads: 3 x 1.18 MB of weights and 6 x 144 KB
+of scales and biases. Every one is under the block size the disk was measured
+at, so the queue never reaches streaming bandwidth.
+
+**The nine reads cannot be coalesced.** The safetensors layout is tensor-major —
+all 256 experts' `gate_proj.weight` is one stacked tensor — so an expert's nine
+slices are scattered across the shard and sometimes across two shards. Checked
+on L1.E0, L1.E5, L30.E100: nine separate runs every time, never two adjacent.
+Bigger blocks would need a repack, and a mixed-precision copy is the 84 GB
+CLAUDE.md rules out.
+
+**More threads do not help either**, which is worth stating because `bw.py`
+established that at 4.42 MB and these reads are 144 KB, where it need not have
+held. At a 10 GB ceiling, pread is 9.0s / 8.6s / 8.9s at 8 / 16 / 32 threads —
+flat inside the noise. 8 stands, and ~3 GB/s is the floor for this access
+pattern rather than a knob left untuned.
 
 **The cost moved rather than vanished: `numpy->mx` is now the largest single
 line, and it went up.** 37 GB at 2.9 GB/s against a 120 GB/s bus is not
@@ -239,6 +251,11 @@ unchanged: it is the six small scale/bias reads per expert, not the thread count
 - `numpy->mx` at ~256 us per array is allocator pressure, not the memory bus:
   one buffer per expert, sliced, or a free-list fed by evictions. Worth less
   than it looked at 6 GB, and worth re-measuring at 16 before touching.
+- **A third of the run is unaccounted and has never been profiled.** pread,
+  numpy->mx and eval sum to 14.9s of 22.4s; the other 7.5s is attention, the
+  quantized matmuls, and whatever the Python in `StreamingMoE.__call__` costs
+  per expert per layer. It is now larger than either measured line, so the next
+  instrumentation belongs there rather than on another fetch idea.
 - The per-batch raw buffers are a real second tier that the ceiling does not
   account for: 278 MB transient at the widest prefill layer. Small, but it is
   exactly the kind of unaccounted residency the ceiling exists to forbid.

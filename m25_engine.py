@@ -33,14 +33,15 @@ def rss_gb():
 
 
 def load_streaming(snap: Path, index_path: str, ceiling_gb: float,
-                   trace: bool = False):
+                   trace: bool = False, threads: int = 8):
     cfg = json.loads((snap / "config.json").read_text())
     q = cfg.pop("quantization")
     model = Model(ModelArgs.from_dict(cfg))
 
     # Tear the experts out before anything can materialise them. After this the
     # only large arrays the model can hold are dense ones.
-    store = M25Store(index_path, ceiling_gb=ceiling_gb, trace=trace)
+    store = M25Store(index_path, ceiling_gb=ceiling_gb, trace=trace,
+                     threads=threads)
     streamers = []
     for li, layer in enumerate(model.model.layers):
         blk = layer.block_sparse_moe
@@ -128,6 +129,7 @@ def main():
     ap.add_argument("--tokens", type=int, default=16)
     ap.add_argument("--prompt", default="The capital of France is")
     ap.add_argument("--trace-out", help="write the routing histogram here")
+    ap.add_argument("--threads", type=int, default=8)
     a = ap.parse_args()
 
     # ponytail: ceiling + core + slack, not a magic 14 -- the old constant did
@@ -144,7 +146,8 @@ def main():
     tok = AutoTokenizer.from_pretrained(str(snap))
     t0 = time.perf_counter()
     model, store, cfg, core = load_streaming(snap, a.index, a.ceiling_gb,
-                                             trace=bool(a.trace_out))
+                                             trace=bool(a.trace_out),
+                                             threads=a.threads)
     print(f"dense core resident: {core:.2f} GB  (loaded in {time.perf_counter()-t0:.0f}s)")
 
     text, t_pre, t_dec, n_pre, pre, dec = generate(model, store, tok, a.prompt,
