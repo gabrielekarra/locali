@@ -7,8 +7,14 @@ params, 2.3 GB at 4-bit. Experts arrive from disk through M25Store.
 
 MLX arrays are lazy until eval, so constructing the 62 SwitchGLU modules costs
 nothing as long as their parameters are dropped before any mx.eval touches
-them. `load_streaming` asserts on process RSS after the swap rather than
+them. `load_streaming` asserts on measured residency after the swap rather than
 trusting that, because getting it wrong once took this machine down.
+
+That assert used to read process RSS, which cannot see these allocations at
+all: a run holding 10.28 GB of mlx arrays reported 3.67 GB resident, because
+Metal buffers do not land in RSS. It now reads mlx's own accounting, which
+does agree with the store's -- 8.00 GB of ceiling plus a 2.73 GB core came to
+10.28 GB active.
 """
 
 import argparse
@@ -25,7 +31,9 @@ from m25_store import M25Store
 from m25_stream import StreamingMoE
 
 DENSE_PREFIXES = ("model.embed_tokens", "model.norm", "lm_head")
-RSS_LIMIT_GB = 12.0
+# Ceiling on the DENSE core at load, checked against mlx's accounting
+# rather than RSS -- see load_streaming.
+CORE_LIMIT_GB = 12.0
 
 
 def rss_gb():
@@ -86,8 +94,15 @@ def load_streaming(snap: Path, index_path: str, ceiling_gb: float,
     cls = type(model.model.layers[0].block_sparse_moe)
     cls.__call__ = lambda self, x: self.__dict__["_stream"](x)
 
-    got = rss_gb()
-    assert got < RSS_LIMIT_GB, f"dense core alone took {got:.1f} GB -- aborting"
+    # RSS cannot see this. mlx allocates through Metal, and a run holding 10.28
+    # GB of arrays reported 3.67 GB resident -- so the guard that exists to
+    # catch 128.7 GB landing in a 24 GB machine was reading a number blind to
+    # exactly the allocations that would cause it. mlx's own accounting is the
+    # real residency; RSS is kept alongside because they disagree and the gap
+    # is worth seeing.
+    got, rss = mx.get_active_memory() / 1e9, rss_gb()
+    assert got < CORE_LIMIT_GB, (f"dense core alone took {got:.1f} GB of mlx "
+                                f"memory (rss says {rss:.1f}) -- aborting")
     return model, store, cfg, got
 
 
@@ -140,6 +155,9 @@ def main():
     ap.add_argument("--prompt", default="The capital of France is")
     ap.add_argument("--trace-out", help="write the routing histogram here")
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--mx-cache-gb", type=float,
+                    help="cap mlx's own buffer cache; it is a second "
+                         "tier our ceiling does not account for")
     ap.add_argument("--profile", action="store_true",
                     help="attribute time inside the MoE block; forces an\n                          eval at each boundary, so the run is slower")
     a = ap.parse_args()
@@ -152,6 +170,9 @@ def main():
     assert avail > need, (f"only {avail:.1f} GB free, need {need:.1f} for a "
                           f"{a.ceiling_gb:.1f} GB ceiling; close things or "
                           f"lower --ceiling-gb")
+
+    if a.mx_cache_gb is not None:
+        mx.set_cache_limit(int(a.mx_cache_gb * 1e9))
 
     snap = Path(a.snap)
     from transformers import AutoTokenizer
@@ -177,6 +198,9 @@ def main():
     s = store.stats()
     print(f"  evictions {s['evictions']}  peak {s['peak']/1e9:.2f} GB  "
           f"rss {rss_gb():.2f} GB")
+    print(f"  mlx itself: active {mx.get_active_memory()/1e9:.2f} GB  "
+          f"buffer cache {mx.get_cache_memory()/1e9:.2f} GB  "
+          f"peak {mx.get_peak_memory()/1e9:.2f} GB")
     acc = s['t_pread'] + s['t_convert'] + s['t_eval']
     print(f"  where the time went: pread {s['t_pread']:.1f}s  "
           f"numpy->mx {s['t_convert']:.1f}s  eval {s['t_eval']:.1f}s  "

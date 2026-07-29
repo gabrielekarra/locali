@@ -293,14 +293,74 @@ routes to repeated experts. Degenerate output flatters the hit rate, so every
 number in this file is an upper bound on what varied text would give, and a
 prompt that produces a loop is the wrong benchmark however good it looks.
 
+## The allocator line is not an allocator problem
+
+`numpy->mx` was 29% of the run and the last line with apparent headroom. Three
+hypotheses, all measured, all wrong.
+
+**Is `mx.array` slow?** No — in isolation it runs at host memcpy speed:
+
+| | GB/s | us/array |
+|---|---|---|
+| per array + eval (what the store does) | 13.5 | 36.5 |
+| per array, eval deferred | 26.1 | 18.9 |
+| one slab for the expert, then slice | 20.6 | 23.9 |
+| numpy memcpy, same bytes | 10.5 | |
+
+The slab is *slower* than nine separate arrays, because `b"".join` costs more
+than the allocations it saves. And 13.5 GB/s against numpy's own 10.5 says the
+conversion is already at the speed this machine copies memory at all. The
+120 GB/s figure is peak bandwidth, not what one thread doing a copy sees.
+
+**Is it allocation churn?** `os.pread` returns a fresh `bytes` per call — 86 GB
+of them over a 64-token run. Replacing that with `os.preadv` into a reused
+`bytearray` measured 25.65 GB/s against 26.14. No difference.
+
+**Is mlx's own buffer cache competing?** It is a genuine second tier and the
+kind of thing that has already burned this project once, but it is 0.59 GB.
+
+What it actually tracks is the ceiling:
+
+| ceiling | bytes converted | time | rate |
+|---|---|---|---|
+| 6 GB | 37.2 GB | 12.8s | 2.91 GB/s |
+| 9 GB | 31.6 GB | 7.9s | 4.00 GB/s |
+| 10 GB | 27.7 GB | 5.9s | 4.69 GB/s |
+
+Conversion gets faster *per byte* as the cache grows, at 4-5 GB/s in situ
+against 26 GB/s on an idle machine. It is memory pressure, and it is downstream
+of the miss rate rather than a cost of its own. **There is nothing to fix here;
+the lever is still bytes read.**
+
+## RSS cannot see the weights
+
+Found while looking for the above, and more important than it:
+
+```
+peak 8.00 GB (store accounting)   rss 3.82 GB
+mlx itself: active 10.28 GB  buffer cache 0.59 GB  peak 10.41 GB
+```
+
+mlx allocates through Metal and those buffers do not appear in process RSS. The
+store's own accounting is vindicated — 8.00 GB of ceiling plus the dense core
+is 10.28 GB active, which is what mlx reports — but **RSS understates true
+residency by 6.5 GB**, and `load_streaming` was asserting on RSS specifically to
+catch 128.7 GB landing in a 24 GB machine. The guard could not have seen the
+failure it exists to prevent. It now reads `mx.get_active_memory()`.
+
+This also corrects the dense core figure. By mlx's accounting it is **2.28 GB**,
+against the 2.26 GB `budget.py` predicts from the config — agreement to 1%. The
+2.73-2.74 GB reported everywhere above is RSS, which includes the interpreter,
+numpy and transformers. Both numbers are real; only one of them is the model.
+
 ## Open
 
 - The 58-slot design point (~16 GB ceiling) still has not been run: the guard
   wants ceiling + 6 GB free and the machine had 16.5. Both runs here are below
   the point the project is designed around, so every number is a lower bound.
-- `numpy->mx` at ~256 us per array is allocator pressure, not the memory bus:
-  one buffer per expert, sliced, or a free-list fed by evictions. Worth less
-  than it looked at 6 GB, and worth re-measuring at 16 before touching.
+- README and CLAUDE.md both quote a 2.74 GB dense core. That is RSS with the
+  interpreter in it; the weights are 2.28 GB. The claim is conservative rather
+  than wrong, but it is not the number it says it is.
 - `route` at 3.2s is 12% for a 3072x256 matmul and an argpartition. The compute
   is nothing; the cost is the per-layer sync, because the expert ids have to
   reach the CPU before anything can be read from disk. Structural to streaming
