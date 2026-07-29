@@ -221,6 +221,4 @@ covers the techniques. `PLAN.md` is the cost model and what is left.
 
 ## License
 
-Not chosen yet — there is no LICENSE file in this repository. Without one the
-default is "all rights reserved", which is probably not what you want if this is
-going public. Add one before announcing it.
+MIT — see [LICENSE](LICENSE).
