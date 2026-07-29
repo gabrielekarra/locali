@@ -271,6 +271,28 @@ token, and it looked like the obvious candidate for the unattributed time. It is
 0.3s. The unattributed third was `route` plus the expert matmuls, neither of
 which was the guess.
 
+## At length: 16 tokens did not lie, but the text does
+
+64 decode tokens at a 9 GB ceiling, sampled every 16 rather than aggregated,
+because an aggregate cannot separate a warming cache from a steady one:
+
+| | @16 | @32 | @48 | @64 | run |
+|---|---|---|---|---|---|
+| hit | 53% | 52% | 68% | 53% | 56.3% |
+| GB/token | 1.30 | 1.31 | 0.85 | 1.28 | 1.19 |
+| tok/s | 0.84 | 0.93 | 1.12 | 0.93 | 0.94 |
+
+Flat. 53.0% over 16 tokens against 56.3% over 64, and the cost split holds
+(pread 37%, numpy->mx 29%, the rest 33%), so the short measurements stand and
+the profile taken on them stands with them.
+
+**The one chunk that moves is a warning about the metric, not the cache.** The
+68% at @48 is exactly where greedy decode fell into a loop -- "France is also a
+member of ... France is also a nuclear power. France is also a". Repeated text
+routes to repeated experts. Degenerate output flatters the hit rate, so every
+number in this file is an upper bound on what varied text would give, and a
+prompt that produces a loop is the wrong benchmark however good it looks.
+
 ## Open
 
 - The 58-slot design point (~16 GB ceiling) still has not been run: the guard
@@ -283,7 +305,9 @@ which was the guess.
   is nothing; the cost is the per-layer sync, because the expert ids have to
   reach the CPU before anything can be read from disk. Structural to streaming
   at all, so probably a floor rather than a bug.
-- Nothing has been measured at more than one prompt of 21 tokens.
+- Still one prompt. Length is now covered, variety is not, and the @48 chunk
+  shows the metric is sensitive to it: a benchmark whose output loops reports a
+  hit rate the model would not get on real text.
 - The per-batch raw buffers are a real second tier that the ceiling does not
   account for: 278 MB transient at the widest prefill layer. Small, but it is
   exactly the kind of unaccounted residency the ceiling exists to forbid.

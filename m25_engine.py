@@ -107,18 +107,28 @@ def generate(model, store, tok, prompt, max_tokens):
     pre = store.stats()
 
     out, y = [], int(mx.argmax(logits[0, -1]))
+    # Sampled in chunks, because one aggregate cannot tell a cache still warming
+    # from a steady state -- and this repo has already shipped a technique that
+    # looked good over a few tokens and died at length.
+    chunk, marks, last = 16, [], (store.stats(), time.perf_counter())
     t0 = time.perf_counter()
-    for _ in range(max_tokens):
+    for i in range(max_tokens):
         out.append(y)
         logits = model(mx.array([[y]]), cache=cache)
         mx.eval(logits)
         y = int(mx.argmax(logits[0, -1]))
+        if (i + 1) % chunk == 0:
+            s, now = store.stats(), time.perf_counter()
+            d = {k: s[k] - last[0][k] for k in ("hits", "misses", "bytes_read")}
+            marks.append((i + 1, d["hits"] / max(d["hits"] + d["misses"], 1),
+                          d["bytes_read"] / 1e9 / chunk, chunk / (now - last[1])))
+            last = (s, now)
     t_decode = time.perf_counter() - t0
 
     post = store.stats()
     dec = {k: post[k] - pre[k] for k in ("hits", "misses", "bytes_read")}
     dec["hit_rate"] = dec["hits"] / max(dec["hits"] + dec["misses"], 1)
-    return tok.decode(out), t_prefill, t_decode, ids.size, pre, dec
+    return tok.decode(out), t_prefill, t_decode, ids.size, pre, dec, marks
 
 
 def main():
@@ -154,13 +164,16 @@ def main():
 
     if a.profile:
         StreamingMoE.prof = {}
-    text, t_pre, t_dec, n_pre, pre, dec = generate(model, store, tok, a.prompt,
+    text, t_pre, t_dec, n_pre, pre, dec, marks = generate(model, store, tok, a.prompt,
                                                    a.tokens)
     print(f"\nprefill {n_pre} tokens in {t_pre:.1f}s ({n_pre/t_pre:.2f} tok/s)")
     print(f"  hit {pre['hit_rate']*100:.1f}%  read {pre['bytes_read']/1e9:.2f} GB")
     print(f"decode {a.tokens} tokens in {t_dec:.1f}s ({a.tokens/t_dec:.2f} tok/s)")
     print(f"  hit {dec['hit_rate']*100:.1f}%  read {dec['bytes_read']/1e9:.2f} GB "
           f"({dec['bytes_read']/1e9/a.tokens:.2f} GB/token)")
+    if len(marks) > 1:
+        print("  by chunk:  " + "   ".join(
+            f"@{n} {hr*100:.0f}% {gb:.2f}GB/t {tps:.2f}tok/s" for n, hr, gb, tps in marks))
     s = store.stats()
     print(f"  evictions {s['evictions']}  peak {s['peak']/1e9:.2f} GB  "
           f"rss {rss_gb():.2f} GB")
