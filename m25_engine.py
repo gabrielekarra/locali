@@ -155,9 +155,6 @@ def main():
     ap.add_argument("--prompt", default="The capital of France is")
     ap.add_argument("--trace-out", help="write the routing histogram here")
     ap.add_argument("--threads", type=int, default=8)
-    ap.add_argument("--mx-cache-gb", type=float,
-                    help="cap mlx's own buffer cache; it is a second "
-                         "tier our ceiling does not account for")
     ap.add_argument("--profile", action="store_true",
                     help="attribute time inside the MoE block; forces an\n                          eval at each boundary, so the run is slower")
     a = ap.parse_args()
@@ -170,9 +167,6 @@ def main():
     assert avail > need, (f"only {avail:.1f} GB free, need {need:.1f} for a "
                           f"{a.ceiling_gb:.1f} GB ceiling; close things or "
                           f"lower --ceiling-gb")
-
-    if a.mx_cache_gb is not None:
-        mx.set_cache_limit(int(a.mx_cache_gb * 1e9))
 
     snap = Path(a.snap)
     from transformers import AutoTokenizer
@@ -201,8 +195,10 @@ def main():
     print(f"  mlx itself: active {mx.get_active_memory()/1e9:.2f} GB  "
           f"buffer cache {mx.get_cache_memory()/1e9:.2f} GB  "
           f"peak {mx.get_peak_memory()/1e9:.2f} GB")
-    acc = s['t_pread'] + s['t_convert'] + s['t_eval']
-    print(f"  where the time went: pread {s['t_pread']:.1f}s  "
+    # t_pread is thread-seconds now that reads overlap compute; t_stall is
+    # the part that could not be hidden and is the only one that is runtime.
+    acc = s['t_stall'] + s['t_convert'] + s['t_eval']
+    print(f"  where the time went: blocked on disk {s['t_stall']:.1f}s  "
           f"numpy->mx {s['t_convert']:.1f}s  eval {s['t_eval']:.1f}s  "
           f"= {acc:.1f}s of {t_pre + t_dec:.1f}s ({acc/(t_pre+t_dec)*100:.0f}%)")
     if a.profile:

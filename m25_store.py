@@ -47,7 +47,11 @@ class M25Store:
         # the hot/cold split needs how often the ROUTER picks an expert, not how
         # often the cache happened to miss it.
         self.trace = {} if trace else None
-        self.t_pread = self.t_convert = self.t_eval = 0.0
+        self.t_convert = self.t_eval = 0.0
+        # Wall time the caller spends BLOCKED on a read. Reads run on worker
+        # threads and overlap compute, so total read time is no longer a
+        # runtime cost -- only the part that could not be hidden is.
+        self.t_stall = 0.0
         # 8 is where measured throughput goes flat on this machine; see bw.py.
         self.pool = ThreadPoolExecutor(max_workers=threads)
 
@@ -84,79 +88,108 @@ class M25Store:
     def _entry_bytes(self, m):
         return sum(m[p][k][3] for p in PROJS for k in ARRS)
 
-    def get_many(self, layer, experts):
-        """Fetch a whole layer call's experts in ONE round of parallel preads.
-
-        Serial reads measured 1.54 GB/s where the disk gives 4.0-4.66: the
-        bottleneck was never the policy, it was one 2.65 MB pread in flight at a
-        time. The router hands the whole routed set over at once, so there is no
-        reason to discover the misses one at a time.
-
-        Returns {expert: arrays}. Every expert asked for is resident on return,
-        which is why the working set has to fit under the ceiling as a whole.
-        """
+    def _plan(self, layer, experts):
+        """Split a request into hits and misses, and count them. Separated from
+        the fetch so the batched and streaming paths cannot drift apart on the
+        one piece of bookkeeping the ceiling depends on."""
         want = list(dict.fromkeys(experts))
         if self.trace is not None:
             t = self.trace.setdefault(layer, {})
             for e in want:
                 t[e] = t.get(e, 0) + 1
 
-        out, miss = {}, []
+        miss, hit_keys = [], []
         for e in want:
             key = (layer, e)
             if key in self.cache:
                 self.hits += 1
                 self.cache.move_to_end(key)   # protects it from this call's evictions
-                out[e] = self.cache[key]
+                hit_keys.append(e)
             else:
                 self.misses += 1
                 miss.append(e)
-        if not miss:
-            return out
+        return want, miss, hit_keys
 
-        metas = {e: self.meta[f"L{layer}.E{e}"] for e in miss}
-        needs = {e: self._entry_bytes(m) for e, m in metas.items()}
+    def _reserve(self, layer, want, needs, hit_keys):
+        """Make room for the WHOLE batch before a byte of it is read.
+
+        Reserving per expert instead would let the batch evict its own earlier
+        members, and reserving after reading would breach the ceiling for the
+        width of that window -- which is the entire invariant.
+        """
         total = sum(needs.values())
-        held = sum(self._entry_bytes(self.meta[f"L{layer}.E{e}"]) for e in out)
+        held = sum(self._entry_bytes(self.meta[f"L{layer}.E{e}"])
+                   for e in hit_keys)
         if total + held > self.ceiling:
             raise ValueError(
                 f"working set for layer {layer} is {(total+held)/1e6:.0f} MB "
                 f"({len(want)} experts) against a {self.ceiling/1e6:.0f} MB "
                 f"ceiling; raise --ceiling-gb")
-
-        # Evict FIRST, for the whole batch. Inserting and trimming afterwards
-        # would breach the ceiling for the width of that window, which is the
-        # whole invariant.
         while self.resident + total > self.ceiling:
             _, ev = self.cache.popitem(last=False)
             self.resident -= sum(v.nbytes for d in ev.values() for v in d.values())
             self.evictions += 1
 
-        recs = [metas[e][p][k] for e in miss for p in PROJS for k in ARRS]
-        t0 = time.perf_counter()
-        raws = list(self.pool.map(self._pread, recs))
-        t1 = time.perf_counter()
-        vals, i = {}, 0
-        for e in miss:
-            vals[e] = {p: {} for p in PROJS}
-            for p in PROJS:
-                for k in ARRS:
-                    vals[e][p][k] = self._to_mx(recs[i], raws[i])
-                    i += 1
-        t2 = time.perf_counter()
-        mx.eval([v for d in vals.values() for pd in d.values() for v in pd.values()])
-        self.t_pread += t1 - t0            # wall time of the batch, not thread-seconds
-        self.t_convert += t2 - t1
-        self.t_eval += time.perf_counter() - t2
+    def get_many(self, layer, experts):
+        """Every expert resident on return. `iter_many` is the same fetch with
+        the results handed over as they land; this is the form for callers that
+        have nothing to do until all of them are here."""
+        return dict(self.iter_many(layer, experts))
 
+    def iter_many(self, layer, experts):
+        """get_many, but yields each expert as it lands.
+
+        Same eviction contract -- the whole batch is reserved up front, so the
+        ceiling never sees a window where residency exceeds it. What changes is
+        only WHEN the caller gets each expert, which is what allows the matmuls
+        on one to run while the rest are still coming off disk.
+
+        Hits are yielded first, on purpose: they cost nothing and give the GPU
+        something to do before the first read completes.
+        """
+        want, miss, hit_keys = self._plan(layer, experts)
+        for e in hit_keys:
+            yield e, self.cache[(layer, e)]
+        if not miss:
+            return
+
+        metas = {e: self.meta[f"L{layer}.E{e}"] for e in miss}
+        needs = {e: self._entry_bytes(m) for e, m in metas.items()}
+        self._reserve(layer, want, needs, hit_keys)
+
+        # A future per ARRAY, so all 9n reads are in flight against 8 threads
+        # rather than n of them. Grouped by expert and awaited in issue order:
+        # the first expert's reads were submitted first, so it lands first, and
+        # the caller gets something to compute on almost immediately.
+        recs = {e: [metas[e][p][k] for p in PROJS for k in ARRS] for e in miss}
+        futs = {e: [self.pool.submit(self._pread, r) for r in recs[e]]
+                for e in miss}
         for e in miss:
-            self.cache[(layer, e)] = vals[e]
+            t0 = time.perf_counter()
+            raws = [f.result() for f in futs[e]]
+            self.t_stall += time.perf_counter() - t0
+
+            t1 = time.perf_counter()
+            # NOT evaluated here. mx.eval is a barrier on the default stream, so
+            # forcing it per expert made every fetch wait on the previous
+            # expert's matmuls and undid the overlap this method exists for.
+            # mx.array copies the buffer on construction, so the raws are free
+            # to go regardless.
+            flat = [self._to_mx(r, b) for r, b in zip(recs[e], raws)]
+            val, i = {}, 0
+            for p in PROJS:
+                val[p] = {}
+                for k in ARRS:
+                    val[p][k] = flat[i]
+                    i += 1
+            self.t_convert += time.perf_counter() - t1
+
+            self.cache[(layer, e)] = val
             self.resident += needs[e]
             self.bytes_read += needs[e]
-            out[e] = vals[e]
-        self.peak = max(self.peak, self.resident)
-        assert self.resident <= self.ceiling, "ceiling breached"
-        return out
+            self.peak = max(self.peak, self.resident)
+            assert self.resident <= self.ceiling, "ceiling breached"
+            yield e, val
 
     def get(self, layer, expert):
         return self.get_many(layer, [expert])[expert]
@@ -167,7 +200,7 @@ class M25Store:
                 "hit_rate": self.hits / t if t else 0.0,
                 "evictions": self.evictions, "bytes_read": self.bytes_read,
                 "resident": self.resident, "peak": self.peak,
-                "slots": len(self.cache), "t_pread": self.t_pread,
+                "slots": len(self.cache), "t_stall": self.t_stall,
                 "t_convert": self.t_convert, "t_eval": self.t_eval}
 
     def dump_trace(self, path):

@@ -93,14 +93,13 @@ class StreamingMoE:
                 routed.setdefault(e, []).append((t, slot))
         t0 = self._tick("group", t0)
 
-        # One parallel round for the whole routed set, not a miss discovered at
-        # a time: this is where the disk's 4 GB/s actually gets used.
-        ws = self.store.get_many(self.layer, list(routed))
-        t0 = self._tick("fetch", t0)
-
-        out = mx.zeros_like(flat)
-        for e, uses in routed.items():
-            w = ws[e]
+        # Experts are consumed as they land, not after the last one arrives, so
+        # the matmuls on one run while the rest are still coming off disk.
+        # async_eval is what makes that real: it submits the work and returns,
+        # leaving the GPU busy while this thread goes back to waiting on a read.
+        parts = {}
+        for e, w in self.store.iter_many(self.layer, list(routed)):
+            uses = routed[e]
             bits = BITS[self.store.tier(self.layer, e)]
             qm = lambda v, p: mx.quantized_matmul(
                 v, w[p]["weight"], w[p]["scales"], w[p]["biases"],
@@ -108,12 +107,22 @@ class StreamingMoE:
             rows = mx.array([t for t, _ in uses])
             xb = flat[rows]
             h = nn.silu(qm(xb, "gate_proj")) * qm(xb, "up_proj")
-            y = qm(h, "down_proj")
             t1 = time.perf_counter()
             g = mx.array([float(gg[t, slot]) for t, slot in uses])[:, None]
             self._tick("gates", t1)
-            out = out.at[rows].add(y * g)
-        t0 = self._tick("expert", t0, out)
+            parts[e] = (rows, qm(h, "down_proj") * g)
+            mx.async_eval(parts[e][1])
+        t0 = self._tick("expert", t0)
+
+        # Combined in the ORDER THE ROUTER GAVE, not the order the disk did.
+        # Float addition is not associative, so accumulating in completion order
+        # would make the output depend on which read finished first -- and the
+        # bit-identity check exists precisely to catch that class of drift.
+        out = mx.zeros_like(flat)
+        for e in routed:
+            rows, val = parts[e]
+            out = out.at[rows].add(val)
+        t0 = self._tick("combine", t0, out)
         return out.reshape(x.shape).astype(x.dtype)
 
 
