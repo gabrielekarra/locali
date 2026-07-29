@@ -243,6 +243,34 @@ running would have sent the next day's work at the wrong cost.
 pread holds at ~3 GB/s across both, so the block-size argument above is
 unchanged: it is the six small scale/bias reads per expert, not the thread count.
 
+## Where the other third goes
+
+`--profile` attributes time inside the MoE block. mlx is lazy, so a timer that
+does not eval measures graph construction rather than work; forcing an eval at
+each boundary is what makes the split real, and it costs 6% — 26.9s profiled
+against 25.4s for the same run without it, so the numbers below are readable as
+they stand. 9 GB ceiling, because the machine had 15.9 GB free and the guard
+wants ceiling + 6:
+
+| bucket | | |
+|---|---|---|
+| fetch | 17.8s | pread 9.9 + numpy->mx 7.7 + eval 0.1 = 17.7, reconciles |
+| expert | 5.3s | the quantized matmuls and the scatter-add |
+| route | 3.2s | gate matmul, argpartition, and the tolist that syncs it |
+| gates | 0.3s | |
+| group | 0.1s | building the python dict |
+
+The four sum to 26.4s of 26.9s, **which leaves attention and the entire dense
+backbone at about 0.5s — 2% of the run.** That is the design premise showing up
+as a measurement: a 2.74 GB resident core costs nothing, and this model is
+entirely a question of how fast experts arrive.
+
+**The hypothesis going in was wrong, and cheaply.** `float(gg[t, slot])` inside
+the expert loop is a GPU->CPU sync per token per slot, ~496 of them per decode
+token, and it looked like the obvious candidate for the unattributed time. It is
+0.3s. The unattributed third was `route` plus the expert matmuls, neither of
+which was the guess.
+
 ## Open
 
 - The 58-slot design point (~16 GB ceiling) still has not been run: the guard
@@ -251,11 +279,11 @@ unchanged: it is the six small scale/bias reads per expert, not the thread count
 - `numpy->mx` at ~256 us per array is allocator pressure, not the memory bus:
   one buffer per expert, sliced, or a free-list fed by evictions. Worth less
   than it looked at 6 GB, and worth re-measuring at 16 before touching.
-- **A third of the run is unaccounted and has never been profiled.** pread,
-  numpy->mx and eval sum to 14.9s of 22.4s; the other 7.5s is attention, the
-  quantized matmuls, and whatever the Python in `StreamingMoE.__call__` costs
-  per expert per layer. It is now larger than either measured line, so the next
-  instrumentation belongs there rather than on another fetch idea.
+- `route` at 3.2s is 12% for a 3072x256 matmul and an argpartition. The compute
+  is nothing; the cost is the per-layer sync, because the expert ids have to
+  reach the CPU before anything can be read from disk. Structural to streaming
+  at all, so probably a floor rather than a bug.
+- Nothing has been measured at more than one prompt of 21 tokens.
 - The per-batch raw buffers are a real second tier that the ceiling does not
   account for: 278 MB transient at the widest prefill layer. Small, but it is
   exactly the kind of unaccounted residency the ceiling exists to forbid.

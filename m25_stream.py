@@ -21,6 +21,7 @@ model. Speed comes after, and only against something known to be right.
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import mlx.core as mx
@@ -36,9 +37,27 @@ GROUP = 64
 class StreamingMoE:
     """Drop-in for MiniMaxSparseMoeBlock.__call__, expert weights from disk."""
 
+    # Set to a dict to attribute time inside the block. It is off by default and
+    # not free of consequences: mlx is lazy, so a timer that does not eval
+    # measures graph construction rather than work, and forcing eval at each
+    # boundary serialises what mlx would otherwise fuse. Read the SPLIT it
+    # gives, not its total -- the total is higher than a real run.
+    prof = None
+
     def __init__(self, store: M25Store, layer: int, gate, bias, top_k: int):
         self.store, self.layer, self.gate = store, layer, gate
         self.bias, self.top_k = bias, top_k
+
+    @staticmethod
+    def _tick(key, t0, *arrays):
+        P = StreamingMoE.prof
+        if P is None:
+            return t0
+        if arrays:
+            mx.eval(*arrays)
+        now = time.perf_counter()
+        P[key] = P.get(key, 0.0) + now - t0
+        return now
 
     def route(self, x):
         """Exactly mlx_lm.models.minimax: the correction bias steers SELECTION,
@@ -60,7 +79,10 @@ class StreamingMoE:
            is what makes prefill cost one pass over the experts instead of one
            pass per token.
         """
+        t0 = time.perf_counter()
         inds, gates = self.route(x)
+        t0 = self._tick("route", t0, inds, gates)
+
         flat = x.reshape(-1, x.shape[-1]).astype(mx.float32)
         ii = inds.reshape(-1, self.top_k).tolist()
         gg = gates.reshape(-1, self.top_k).astype(mx.float32)
@@ -69,10 +91,13 @@ class StreamingMoE:
         for t, row in enumerate(ii):
             for slot, e in enumerate(row):
                 routed.setdefault(e, []).append((t, slot))
+        t0 = self._tick("group", t0)
 
         # One parallel round for the whole routed set, not a miss discovered at
         # a time: this is where the disk's 4 GB/s actually gets used.
         ws = self.store.get_many(self.layer, list(routed))
+        t0 = self._tick("fetch", t0)
+
         out = mx.zeros_like(flat)
         for e, uses in routed.items():
             w = ws[e]
@@ -84,8 +109,11 @@ class StreamingMoE:
             xb = flat[rows]
             h = nn.silu(qm(xb, "gate_proj")) * qm(xb, "up_proj")
             y = qm(h, "down_proj")
+            t1 = time.perf_counter()
             g = mx.array([float(gg[t, slot]) for t, slot in uses])[:, None]
+            self._tick("gates", t1)
             out = out.at[rows].add(y * g)
+        t0 = self._tick("expert", t0, out)
         return out.reshape(x.shape).astype(x.dtype)
 
 

@@ -130,6 +130,8 @@ def main():
     ap.add_argument("--prompt", default="The capital of France is")
     ap.add_argument("--trace-out", help="write the routing histogram here")
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--profile", action="store_true",
+                    help="attribute time inside the MoE block; forces an\n                          eval at each boundary, so the run is slower")
     a = ap.parse_args()
 
     # ponytail: ceiling + core + slack, not a magic 14 -- the old constant did
@@ -150,6 +152,8 @@ def main():
                                              threads=a.threads)
     print(f"dense core resident: {core:.2f} GB  (loaded in {time.perf_counter()-t0:.0f}s)")
 
+    if a.profile:
+        StreamingMoE.prof = {}
     text, t_pre, t_dec, n_pre, pre, dec = generate(model, store, tok, a.prompt,
                                                    a.tokens)
     print(f"\nprefill {n_pre} tokens in {t_pre:.1f}s ({n_pre/t_pre:.2f} tok/s)")
@@ -164,6 +168,11 @@ def main():
     print(f"  where the time went: pread {s['t_pread']:.1f}s  "
           f"numpy->mx {s['t_convert']:.1f}s  eval {s['t_eval']:.1f}s  "
           f"= {acc:.1f}s of {t_pre + t_dec:.1f}s ({acc/(t_pre+t_dec)*100:.0f}%)")
+    if a.profile:
+        P = StreamingMoE.prof
+        # 'gates' is measured INSIDE 'expert', not beside it.
+        print("  inside the MoE block: " + "  ".join(
+            f"{k} {v:.1f}s" for k, v in sorted(P.items(), key=lambda kv: -kv[1])))
     print(f"\n{a.prompt}{text}")
 
     if a.trace_out:
