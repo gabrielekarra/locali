@@ -485,16 +485,33 @@ unchunked read 0%. Bytes read are identical (292.98 GB against 293.22), so that
 is chunks re-requesting each other's experts and counting as hits, not reuse.
 The bytes are the honest number.
 
-Sweeping the knob at B=512 settles it — the two phases want opposite things:
+Sweeping the knob at B=512:
 
 | chunk | prefill (4096 tok) | decode (512 wide) |
 |---|---|---|
 | none (serial) | 12.1 tok/s | **8.31** |
 | 512 | 11.1 | **8.31** (no chunking at T=512) |
-| 128 | **18.3** | 7.05 |
+| 128 | 18.3 *then 12.4* | 7.05 |
 
-Prefill wants it small and decode wants it off, so the engine sets it per phase
-rather than per run. One number could only ever have had one of the two.
+**Only the decode column is trustworthy.** It repeats: 8.31, 8.31, 8.32 across
+three runs, and 7.05 at chunk 128 is well outside that. Chunking hurts decode,
+and the reason is visible — four gathers of 128 tokens are weaker kernels than
+one of 512.
+
+The prefill column is not established. The *same configuration* — chunk 128,
+B=512, 2.5 GB, identical 81.19 GB read and identical 95.2% hit — measured 224.1s
+once and 330.6s later. **1.5x run to run on identical work**, which is larger
+than every difference the column is claiming. Prefill here is one measurement
+per setting and one measurement is not enough at that spread.
+
+So: decode is chunked off because that is measured. Prefill keeps the knob
+because it might help and does not appear to hurt, not because 18.3 was real.
+The B=256 split-vs-masked prefill gap (7.0 against 21.1) is 3x and so probably
+survives this variance, but it was also a single pair of runs.
+
+**What the variance is:** unknown, and worth finding before any more prefill
+tuning. Bytes and hit rate are identical across the pair, so it is not the
+workload. Thermal, memory pressure from other applications, or the drive.
 
 ## Open
 
