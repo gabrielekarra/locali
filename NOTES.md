@@ -202,11 +202,43 @@ bandwidth — it is ~50k separate `mx.array` allocations at ~256 us each. It got
 worse because a batch holds every raw buffer alive at once where the serial path
 reused one hot page, which is also where the 1.7 GB of extra RSS comes from.
 
+## What the ceiling is worth
+
+Everything above ran at 6 GB, which was not a choice — it was what fit beside a
+browser. Same prompt, same index, threaded fetch, only the ceiling moved:
+
+| ceiling | 6 GB | 10 GB |
+|---|---|---|
+| nominal slots/layer | 21 | 36 |
+| decode | 0.56 tok/s | **1.00** |
+| hit | 40.7% | **61.7%** |
+| GB/token | 1.65 | **1.06** |
+| pread | 12.7s | 9.0s |
+| numpy->mx | 12.8s | 5.9s |
+| evictions | 5591 | 3197 |
+| total | 35.5s | 22.4s |
+
+4 GB of cache bought 1.8x. Nothing else changed.
+
+**`numpy->mx` fell 12.8s -> 5.9s on a 26% drop in bytes read**, which is
+superlinear and the reason to have run this before optimizing it: fewer misses
+means fewer arrays and less allocator pressure at once, so per-byte it went 2.9
+-> 4.7 GB/s on its own. It is back to second place behind pread. The lesson is
+the one already in CLAUDE.md — the operating point has to be right before the
+profile means anything, and a profile taken at a ceiling chosen by what else was
+running would have sent the next day's work at the wrong cost.
+
+pread holds at ~3 GB/s across both, so the block-size argument above is
+unchanged: it is the six small scale/bias reads per expert, not the thread count.
+
 ## Open
 
-- `numpy->mx` at 12.8s, ~256 us per array, is the next factor. It is allocator
-  pressure, not the memory bus: one buffer per expert, sliced, or a free-list
-  fed by evictions.
+- The 58-slot design point (~16 GB ceiling) still has not been run: the guard
+  wants ceiling + 6 GB free and the machine had 16.5. Both runs here are below
+  the point the project is designed around, so every number is a lower bound.
+- `numpy->mx` at ~256 us per array is allocator pressure, not the memory bus:
+  one buffer per expert, sliced, or a free-list fed by evictions. Worth less
+  than it looked at 6 GB, and worth re-measuring at 16 before touching.
 - The per-batch raw buffers are a real second tier that the ceiling does not
   account for: 278 MB transient at the widest prefill layer. Small, but it is
   exactly the kind of unaccounted residency the ceiling exists to forbid.

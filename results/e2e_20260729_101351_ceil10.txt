@@ -1,0 +1,10 @@
+dense core resident: 2.73 GB  (loaded in 1s)
+
+prefill 5 tokens in 6.3s (0.79 tok/s)
+  hit 0.0%  read 10.79 GB
+decode 16 tokens in 16.0s (1.00 tok/s)
+  hit 61.7%  read 16.90 GB (1.06 GB/token)
+  evictions 3197  peak 10.00 GB  rss 2.22 GB
+  where the time went: pread 9.0s  numpy->mx 5.9s  eval 0.1s  = 14.9s of 22.4s (67%)
+
+The capital of France is Paris. The official language is French. The currency is the Euro. The population
