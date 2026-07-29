@@ -1,0 +1,10 @@
+dense core resident: 6.29 GB  (loaded in 1s)
+
+batch 64, prefill 1024 tokens in 164.4s (6.2 tok/s)
+  hit 0.0%  read 76.73 GB
+decode 512 tokens (8 x 64) in 172.1s -> 2.98 tok/s aggregate, 0.05 per sequence
+  hit 0.0%  read 351.07 GB (0.686 GB/token)
+  evictions 79125  arena 4.00 GB  blocked on disk 149.8s of 336.4s
+  mlx active 6.29 GB
+  seq0: ' good fortune, must be in want of'
+  seq1: ' the circumstances of the man, the fact'

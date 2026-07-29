@@ -1,0 +1,11 @@
+dense core resident: 8.29 GB  (loaded in 1s)
+
+batch 8, prefill 128 tokens in 24.5s (5.2 tok/s)
+  hit 0.0%  read 53.78 GB
+decode 128 tokens (16 x 8) in 96.6s -> 1.33 tok/s aggregate, 0.17 per sequence
+  hit 0.0%  read 247.59 GB (1.934 GB/token)
+  by chunk:  @8 0% 1.92GB/t 1.3tok/s   @16 0% 1.95GB/t 1.3tok/s
+  evictions 54670  arena 6.00 GB  blocked on disk 94.6s of 121.1s
+  mlx active 8.29 GB
+  seq0: ' good fortune, must be in want of a wife. However little known the\n'
+  seq1: ' the circumstances of the man, the fact that he is in want of a wife'

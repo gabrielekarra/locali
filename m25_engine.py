@@ -29,6 +29,7 @@ from mlx_lm.models.minimax import Model, ModelArgs
 
 from m25_store import M25Store
 from m25_stream import StreamingMoE
+from m25_arena import ArenaStore, ArenaMoE
 
 DENSE_PREFIXES = ("model.embed_tokens", "model.norm", "lm_head")
 # Ceiling on the DENSE core at load, checked against mlx's accounting
@@ -41,20 +42,27 @@ def rss_gb():
 
 
 def load_streaming(snap: Path, index_path: str, ceiling_gb: float,
-                   trace: bool = False, threads: int = 8):
+                   trace: bool = False, threads: int = 8,
+                   arena: bool = False, hot_share: float = 0.33):
     cfg = json.loads((snap / "config.json").read_text())
     q = cfg.pop("quantization")
     model = Model(ModelArgs.from_dict(cfg))
 
     # Tear the experts out before anything can materialise them. After this the
     # only large arrays the model can hold are dense ones.
-    store = M25Store(index_path, ceiling_gb=ceiling_gb, trace=trace,
-                     threads=threads)
+    if arena:
+        store = ArenaStore(index_path, ceiling_gb=ceiling_gb,
+                           hot_share=hot_share, threads=threads)
+        Block = ArenaMoE
+    else:
+        store = M25Store(index_path, ceiling_gb=ceiling_gb, trace=trace,
+                         threads=threads)
+        Block = StreamingMoE
     streamers = []
     for li, layer in enumerate(model.model.layers):
         blk = layer.block_sparse_moe
-        sm = StreamingMoE(store, li, blk.gate, blk.e_score_correction_bias,
-                          blk.num_experts_per_tok)
+        sm = Block(store, li, blk.gate, blk.e_score_correction_bias,
+                   blk.num_experts_per_tok)
         blk.switch_mlp = nn.Module()          # drop the [256, ...] parameters
         blk.__dict__["_stream"] = sm
         streamers.append(sm)
@@ -146,6 +154,60 @@ def generate(model, store, tok, prompt, max_tokens):
     return tok.decode(out), t_prefill, t_decode, ids.size, pre, dec, marks
 
 
+def generate_batch(model, store, tok, n_seq, prompt_len, max_tokens):
+    """Decode n_seq independent sequences in lockstep.
+
+    The point is not parallelism for its own sake. A decode step fetches the
+    UNION of what its tokens route to, and that union was measured growing at
+    half the independent rate -- 81.8 experts per layer for 32 tokens where
+    independence predicts 163.3. So every sequence added amortises the fetch
+    over more output, and the 1488 matvec launches per pass amortise perfectly.
+
+    Prompts are distinct slices of the same book: equal length so no padding is
+    needed, and different content so the routing genuinely diverges. Feeding the
+    same prompt n times would share every expert and report a fiction.
+    """
+    from mlx_lm.models.cache import make_prompt_cache
+
+    text = Path("eval/pride_prejudice.txt").read_text()
+    all_ids = tok(text)["input_ids"]
+    need = n_seq * prompt_len
+    assert len(all_ids) >= need, f"need {need} tokens, book gives {len(all_ids)}"
+    ids = mx.array([all_ids[i * prompt_len:(i + 1) * prompt_len]
+                    for i in range(n_seq)])
+
+    cache = make_prompt_cache(model)
+    t0 = time.perf_counter()
+    logits = model(ids, cache=cache)
+    mx.eval(logits)
+    t_prefill = time.perf_counter() - t0
+    pre = store.stats()
+
+    y = mx.argmax(logits[:, -1], axis=-1)
+    chunk, marks, last = 8, [], (store.stats(), time.perf_counter())
+    out = []
+    t0 = time.perf_counter()
+    for i in range(max_tokens):
+        out.append(y)
+        logits = model(y[:, None], cache=cache)
+        mx.eval(logits)
+        y = mx.argmax(logits[:, -1], axis=-1)
+        if (i + 1) % chunk == 0:
+            s, now = store.stats(), time.perf_counter()
+            d = {k: s[k] - last[0][k] for k in ("hits", "misses", "bytes_read")}
+            marks.append((i + 1, d["hits"] / max(d["hits"] + d["misses"], 1),
+                          d["bytes_read"] / 1e9 / (chunk * n_seq),
+                          chunk * n_seq / (now - last[1])))
+            last = (s, now)
+    t_decode = time.perf_counter() - t0
+
+    post = store.stats()
+    dec = {k: post[k] - pre[k] for k in ("hits", "misses", "bytes_read")}
+    dec["hit_rate"] = dec["hits"] / max(dec["hits"] + dec["misses"], 1)
+    texts = [tok.decode([int(o[j]) for o in out]) for j in range(min(n_seq, 2))]
+    return texts, t_prefill, t_decode, ids.size, pre, dec, marks
+
+
 def measure_draft(model, store, tok, prompt, n):
     """Acceptance rate of the cache as its own draft model.
 
@@ -205,6 +267,14 @@ def main():
     ap.add_argument("--prompt", default="The capital of France is")
     ap.add_argument("--trace-out", help="write the routing histogram here")
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--batch", type=int, default=1,
+                    help="decode this many independent sequences at once")
+    ap.add_argument("--prompt-len", type=int, default=16)
+    ap.add_argument("--arena", action="store_true",
+                    help="preallocated unified-memory arena + gather_qmm")
+    ap.add_argument("--hot-share", type=float, default=0.33,
+                    help="fraction of the ceiling given to the 4-bit arena; "
+                         "measured access mix is 32.6%% hot")
     ap.add_argument("--measure-draft", type=int, default=0,
                     help="acceptance rate of the resident cache as a draft model")
     ap.add_argument("--profile", action="store_true",
@@ -226,7 +296,9 @@ def main():
     t0 = time.perf_counter()
     model, store, cfg, core = load_streaming(snap, a.index, a.ceiling_gb,
                                              trace=bool(a.trace_out),
-                                             threads=a.threads)
+                                             threads=a.threads,
+                                             arena=a.arena,
+                                             hot_share=a.hot_share)
     print(f"dense core resident: {core:.2f} GB  (loaded in {time.perf_counter()-t0:.0f}s)")
 
     if a.measure_draft:
@@ -239,6 +311,31 @@ def main():
         print(f"  hit {s['hit_rate']*100:.1f}%  peak {s['peak']/1e9:.2f} GB")
         agree = [tok.decode([d]) for d, y in pairs if d == y][:12]
         print(f"  accepted: {agree}")
+        store.close()
+        return
+
+    if a.batch > 1:
+        texts, t_pre, t_dec, n_pre, pre, dec, marks = generate_batch(
+            model, store, tok, a.batch, a.prompt_len, a.tokens)
+        n_out = a.batch * a.tokens
+        print(f"\nbatch {a.batch}, prefill {n_pre} tokens in {t_pre:.1f}s "
+              f"({n_pre/t_pre:.1f} tok/s)")
+        print(f"  hit {pre['hit_rate']*100:.1f}%  read {pre['bytes_read']/1e9:.2f} GB")
+        print(f"decode {n_out} tokens ({a.tokens} x {a.batch}) in {t_dec:.1f}s "
+              f"-> {n_out/t_dec:.2f} tok/s aggregate, "
+              f"{a.tokens/t_dec:.2f} per sequence")
+        print(f"  hit {dec['hit_rate']*100:.1f}%  read {dec['bytes_read']/1e9:.2f} GB "
+              f"({dec['bytes_read']/1e9/n_out:.3f} GB/token)")
+        if len(marks) > 1:
+            print("  by chunk:  " + "   ".join(
+                f"@{n} {hr*100:.0f}% {gb:.2f}GB/t {tps:.1f}tok/s"
+                for n, hr, gb, tps in marks))
+        s = store.stats()
+        print(f"  evictions {s['evictions']}  arena {s['peak']/1e9:.2f} GB  "
+              f"blocked on disk {s['t_stall']:.1f}s of {t_pre+t_dec:.1f}s")
+        print(f"  mlx active {mx.get_active_memory()/1e9:.2f} GB")
+        for i, t in enumerate(texts):
+            print(f"  seq{i}: {t[:70]!r}")
         store.close()
         return
 

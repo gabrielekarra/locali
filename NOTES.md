@@ -353,6 +353,85 @@ against the 2.26 GB `budget.py` predicts from the config — agreement to 1%. Th
 2.73-2.74 GB reported everywhere above is RSS, which includes the interpreter,
 numpy and transformers. Both numbers are real; only one of them is the model.
 
+## The arena: what unified memory allows that PCIe does not
+
+Every offloading system in the literature moves weights host -> device across a
+bus, so their designs are about hiding that transfer. Apple Silicon has no
+transfer. The GPU reads the same LPDDR the CPU writes, mlx hands out a
+**writable** memoryview of its own buffers, and those buffers land 16 KB
+page-aligned -- which is exactly what `F_NOCACHE` needs to DMA into user memory
+instead of bouncing through the kernel.
+
+So the bytes can go from the SSD controller straight into the memory
+`gather_qmm` will read. `hw_probe.py`, F_NOCACHE, 1.18 MB blocks:
+
+| path | |
+|---|---|
+| `pread` -> bytes -> `mx.array` (the old store) | 1.89 GB/s |
+| `preadv` -> freshly allocated mlx array | 1.49 GB/s |
+| **`preadv` -> preallocated arena slot** | **2.62 GB/s** |
+
+Allocating per read is *worse* than the copy it saves: `mx.zeros` writes the
+bytes the read is about to overwrite, and faults fresh pages. Preallocated, it
+is +39% **and the conversion disappears entirely** -- `numpy->mx` was 29% of the
+run and now reports 0.0s.
+
+Two more from the same probe. A warm single-threaded memcpy does **42 GB/s**,
+not the 10.5 measured earlier against fresh pages, which settles that the old
+conversion cost was page faults rather than the bus. And page-aligned offsets
+read at 2.59 GB/s against 1.86 unaligned -- **no offset in the checkpoint is 16
+KB aligned** (7797, 9845, 13941 ...), so every read pays that. The 4-bit
+snapshot's layout is HuggingFace's, but the 2-bit cold pack is ours to write.
+
+**The ceiling stops being a rule and becomes a property of the allocation.** The
+arenas are all the memory there is, so residency cannot exceed them; eviction is
+a slot being reused.
+
+### The verification got stronger, not weaker
+
+The old path compared dequantize-then-matmul against `gather_qmm` -- different
+computations, stuck at 7.8e-3 however correct the fetch -- so it had to build
+its own reference. The arena uses the framework's own kernel, so the framework
+becomes the reference:
+
+```
+vs mlx_lm blk(x), SAME kernel: max abs 0.000e+00  relative 0.000e+00
+```
+
+That took copying mlx_lm exactly: the normalised scores cast to `x.dtype`
+*before* weighting, and `swiglu` as the one fused op rather than `silu(g) * u`,
+which rounds differently on its own.
+
+## Batching: measured, and where it stops
+
+| B | GB/token | hit | tok/s aggregate |
+|---|---|---|---|
+| 1 | 1.72 | 40.3% | 1.35 |
+| 8 | 1.93 | 0% | 1.33 |
+| 32 | 1.077 | 0% | 2.07 |
+| 64 | 0.686 | 0% | 2.98 |
+| 256 | 0.257 | 0% | **5.74** |
+
+6 GB ceiling to B=32, then 4 and 3 as the machine allowed. Batch 1 with the
+arena is 1.35 tok/s at a 40.3% hit against the old path's 1.05 at a *better*
+53.4% hit.
+
+**The hit rate goes to zero from B=8 onward** and that is not a defect: a pass at
+B=32 touches ~82 experts per layer, 28 GB against a 6 GB arena, so nothing
+survives to be reused. B=8 is the worst of both worlds -- it has lost the cache
+and not yet gained the union. The win past that is entirely the union of what
+consecutive tokens route to, which is why bytes/token halves as B doubles.
+
+**At B=256 the disk stops being the constraint.** 0.257 GB/token at 5.74 tok/s
+is 1.48 GB/s effective against 2.62 available. Compute binds instead -- and the
+two-tier gather computes every `[T, k]` entry twice, once per tier, with the
+other tier's gates zeroed. Free in kernel launches, 2x in FLOPs, and that trade
+was correct at batch 1 and is wrong at 256.
+
+**Null result worth recording:** issuing reads sorted by disk offset instead of
+routing order measured 1.95 tok/s against 2.07 at B=32. With eight reads already
+in flight the drive schedules better than the sort does.
+
 ## Open
 
 - The 58-slot design point (~16 GB ceiling) still has not been run: the guard

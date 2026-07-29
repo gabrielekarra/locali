@@ -216,6 +216,34 @@ Across tokens there is redundancy, it is large, and it was under-measured.
 new. That is a different product than a fast chat loop: 32 completions at once,
 for generation, evaluation, or serving.
 
+## Built and measured: the arena
+
+`m25_arena.py` replaces the per-expert cache with a preallocated arena in
+unified memory, read into by `preadv` and gathered by `gather_qmm`. Details and
+the hardware probe are in NOTES.md. Against the ranking above it lands #1 and #4
+together and removes floor 3 outright:
+
+| | before | arena |
+|---|---|---|
+| batch 1 | 1.05 tok/s @ 53.4% hit | **1.35 @ 40.3%** |
+| `numpy->mx` | 21.4s (29%) | **0.0s** |
+| launches/layer | 24 | 6 |
+| reference | its own, 7.8e-3 from the framework | **mlx_lm's `blk(x)`, 0.000e+00** |
+| batch 256 | — | **5.74 tok/s aggregate**, 0.257 GB/token |
+
+The floors move. Floor 3 (host copy) is gone. Floor 2 (launches) is amortised by
+the batch. Floor 1 (bytes) is what the batch attacks through the union, and the
+measured curve is `1.72 -> 1.077 -> 0.686 -> 0.257` GB/token at B = 1, 32, 64,
+256 -- bytes per token roughly halving per doubling, because the union saturates
+toward one sweep of the layer.
+
+**Extrapolating the same curve, 20 tok/s wants B ≈ 400.** That is now a question
+about compute and KV memory rather than about the disk: at B=256 the effective
+read rate is already down to 1.48 GB/s of an available 2.62, so bandwidth has
+slack and the binding cost has moved into the gather. The next factor is
+therefore the two-tier masking, which computes every entry twice -- correct at
+batch 1, 2x waste at 256.
+
 ## What I would do
 
 Build #1 and #2. They are the two with real factors in them, they are

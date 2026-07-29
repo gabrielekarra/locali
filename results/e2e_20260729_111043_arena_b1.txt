@@ -1,0 +1,14 @@
+dense core resident: 8.29 GB  (loaded in 1s)
+
+prefill 5 tokens in 4.3s (1.16 tok/s)
+  hit 0.0%  read 10.89 GB
+decode 32 tokens in 23.7s (1.35 tok/s)
+  hit 40.3%  read 55.09 GB (1.72 GB/token)
+  by chunk:  @16 41% 1.70GB/t 1.38tok/s   @32 39% 1.74GB/t 1.32tok/s
+  evictions 10256  peak 6.00 GB  rss 6.13 GB
+  mlx itself: active 8.29 GB  buffer cache 0.07 GB  peak 8.36 GB
+  where the time went: blocked on disk 18.7s  numpy->mx 0.0s  eval 0.0s  = 18.7s of 28.0s (67%)
+
+The capital of France is Paris. The official language is French. The currency is the Euro. The population is about 67 million. The flag is blue and white.
+
+France is a

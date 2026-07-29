@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/Users/gabrielekarra/dev/locali/m25_engine.py", line 380, in <module>
+    main()
+  File "/Users/gabrielekarra/dev/locali/m25_engine.py", line 289, in main
+    assert avail > need, (f"only {avail:.1f} GB free, need {need:.1f} for a "
+           ^^^^^^^^^^^^
+AssertionError: only 11.3 GB free, need 12.0 for a 6.0 GB ceiling; close things or lower --ceiling-gb
