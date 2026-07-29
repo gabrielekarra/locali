@@ -177,19 +177,11 @@ def generate_batch(model, store, tok, n_seq, prompt_len, max_tokens):
                     for i in range(n_seq)])
 
     cache = make_prompt_cache(model)
-    # The two phases want opposite chunkings and were measured wanting it. At
-    # B=512: prefill 18.3 tok/s at chunk 128 against 11.1 at 512, because its
-    # 4096-wide grids have room to give and the overlap pays; decode 8.31
-    # against 7.05, because four gathers of 128 are weaker kernels than one of
-    # 512 and the overlap does not cover the loss. So chunk per phase.
-    prefill_chunk, decode_chunk = ArenaMoE.chunk, max(n_seq, ArenaMoE.chunk)
-    ArenaMoE.chunk = prefill_chunk
     t0 = time.perf_counter()
     logits = model(ids, cache=cache)
     mx.eval(logits)
     t_prefill = time.perf_counter() - t0
     pre = store.stats()
-    ArenaMoE.chunk = decode_chunk
 
     y = mx.argmax(logits[:, -1], axis=-1)
     chunk, marks, last = 8, [], (store.stats(), time.perf_counter())
@@ -278,9 +270,6 @@ def main():
     ap.add_argument("--batch", type=int, default=1,
                     help="decode this many independent sequences at once")
     ap.add_argument("--prompt-len", type=int, default=16)
-    ap.add_argument("--chunk", type=int, default=512,
-                    help="tokens per fetch/gather chunk; smaller overlaps "
-                         "more disk but splits the gather into weaker kernels")
     ap.add_argument("--arena", action="store_true",
                     help="preallocated unified-memory arena + gather_qmm")
     ap.add_argument("--hot-share", type=float, default=0.33,
@@ -324,8 +313,6 @@ def main():
         print(f"  accepted: {agree}")
         store.close()
         return
-
-    ArenaMoE.chunk = a.chunk
 
     if a.batch > 1:
         texts, t_pre, t_dec, n_pre, pre, dec, marks = generate_batch(

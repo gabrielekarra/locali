@@ -491,27 +491,34 @@ Sweeping the knob at B=512:
 |---|---|---|
 | none (serial) | 12.1 tok/s | **8.31** |
 | 512 | 11.1 | **8.31** (no chunking at T=512) |
-| 128 | 18.3 *then 12.4* | 7.05 |
+| 128 | 18.3 | 7.05 |
 
-**Only the decode column is trustworthy.** It repeats: 8.31, 8.31, 8.32 across
-three runs, and 7.05 at chunk 128 is well outside that. Chunking hurts decode,
-and the reason is visible — four gathers of 128 tokens are weaker kernels than
-one of 512.
+That table reported an 18.3 that does not exist. Repeating the identical
+configuration — chunk 128, B=512, 2.5 GB, same 81.19 GB read at the same 95.2%
+hit — five times gives **224.1, 326.6, 330.6, 359.4, 359.8s**: four in a band of
+11.4-12.5 tok/s and one fast outlier. Serial (12.1) and chunk 512 (11.1) sit
+inside that same band.
 
-The prefill column is not established. The *same configuration* — chunk 128,
-B=512, 2.5 GB, identical 81.19 GB read and identical 95.2% hit — measured 224.1s
-once and 330.6s later. **1.5x run to run on identical work**, which is larger
-than every difference the column is claiming. Prefill here is one measurement
-per setting and one measurement is not enough at that spread.
+**So chunking does nothing for prefill and costs decode, and the code is gone.**
+Decode is the column that repeats — 8.31, 8.31, 8.32 against 7.05 at chunk 128,
+well outside the spread — and the mechanism is visible: four gathers of 128
+tokens are weaker kernels than one of 512.
 
-So: decode is chunked off because that is measured. Prefill keeps the knob
-because it might help and does not appear to hurt, not because 18.3 was real.
-The B=256 split-vs-masked prefill gap (7.0 against 21.1) is 3x and so probably
-survives this variance, but it was also a single pair of runs.
+The overlap itself was real (105s blocked on disk against 129s), which is the
+part worth keeping in mind: hiding the fetch works, splitting the token
+dimension to do it costs more than it hides. Any future attempt should split by
+**tier** instead, which the code already gathers separately, so the token
+dimension stays wide. `submit`/`wait` stay split from `slots_for` to leave that
+seam open.
 
-**What the variance is:** unknown, and worth finding before any more prefill
-tuning. Bytes and hit rate are identical across the pair, so it is not the
-workload. Thermal, memory pressure from other applications, or the drive.
+**The lesson is the measurement, not the feature.** One run per setting looked
+like a clean 1.5x story and a per-phase mechanism got built on it. The spread
+was as large as the effect. Prefill numbers in this file taken from single runs
+should be read with that in mind -- including the B=256 split-vs-masked prefill
+gap, which is 3x and probably survives, but is also one pair.
+
+Cause of the spread is unknown. Bytes and hit rate are identical across the five,
+so it is not the workload -- thermal, other applications, or the drive.
 
 ## Open
 

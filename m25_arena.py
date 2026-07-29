@@ -158,11 +158,14 @@ class ArenaStore:
         """Claim slots now, return before the bytes arrive.
 
         Slots are claimed synchronously so a later submit cannot steal one an
-        earlier submit is still filling; only the reads are deferred. That is
-        what lets a caller queue several chunks of a layer and compute on the
-        first while the rest are in flight -- the arena path was otherwise
-        strictly read-everything-then-gather, which at batch 512 was ~32s of
-        disk followed by ~30s of compute with neither covering the other.
+        earlier submit is still filling; only the reads are deferred.
+
+        Nothing currently defers them. Splitting a layer's tokens into chunks
+        and staggering the waits was tried and removed: it does hide disk (105s
+        against 129s blocked at B=512) but the gathers get narrower and the
+        penalty is larger than the hiding. Kept split from `slots_for` because
+        the seam is where any future overlap has to go -- per tier rather than
+        per token, so the token dimension stays wide.
         """
         want = list(dict.fromkeys(experts))
         out, miss = {}, []
@@ -248,19 +251,10 @@ class ArenaMoE:
         g = mx.take_along_axis(scores, inds, axis=-1)
         return inds, g / (mx.sum(g, axis=-1, keepdims=True) + 1e-20)
 
-    # Tokens per chunk. One chunk means the old behaviour: read the whole layer,
-    # then gather. More chunks let the gather on chunk c run while c+1 is still
-    # coming off disk, which is the only overlap available -- layer L+1 cannot
-    # start early because its router needs layer L's output.
-    chunk = 128
-
     def __call__(self, x):
         shape = x.shape
         flat = x.reshape(-1, shape[-1])
         T = flat.shape[0]
-        if T > self.chunk:
-            return self._chunked(x, flat, shape, T)
-
         inds, gates = self.route(x)
         ii = inds.reshape(-1, self.top_k).tolist()
         placed = self.store.slots_for(self.layer, [e for row in ii for e in row])
@@ -318,32 +312,6 @@ class ArenaMoE:
             g = gflat[mx.array(ent[:, 0] * self.top_k + ent[:, 1])]
             out = out.at[rows].add(y.astype(mx.float32) * g[:, None])
         return out.astype(dtype)
-
-    def _chunked(self, x, flat, shape, T):
-        """Queue every chunk's reads, then gather them in order.
-
-        Claiming happens inside submit, so all chunks own their slots before any
-        byte lands and no chunk can evict another. Only the waiting is staggered.
-        """
-        inds, gates = self.route(x)
-        ii = inds.reshape(-1, self.top_k).tolist()
-        sc_all = gates.reshape(T, self.top_k).astype(x.dtype)
-
-        pending = []
-        for lo in range(0, T, self.chunk):
-            hi = min(lo + self.chunk, T)
-            rows = [e for row in ii[lo:hi] for e in row]
-            placed, futs = self.store.submit(self.layer, rows)
-            pending.append((lo, hi, placed, futs))
-
-        parts = []
-        for lo, hi, placed, futs in pending:
-            self.store.wait(futs)
-            y = self._apply(flat[lo:hi], ii[lo:hi], placed, sc_all[lo:hi],
-                            shape[-1], x.dtype)
-            parts.append(y)
-            mx.async_eval(y)
-        return mx.concatenate(parts, axis=0).reshape(shape).astype(x.dtype)
 
     def _gather(self, t, xin, idx):
         A = lambda p, k: self.store.arena[(t, p, k)]
