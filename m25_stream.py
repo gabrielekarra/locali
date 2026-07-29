@@ -70,9 +70,12 @@ class StreamingMoE:
             for slot, e in enumerate(row):
                 routed.setdefault(e, []).append((t, slot))
 
+        # One parallel round for the whole routed set, not a miss discovered at
+        # a time: this is where the disk's 4 GB/s actually gets used.
+        ws = self.store.get_many(self.layer, list(routed))
         out = mx.zeros_like(flat)
         for e, uses in routed.items():
-            w = self.store.get(self.layer, e)
+            w = ws[e]
             bits = BITS[self.store.tier(self.layer, e)]
             qm = lambda v, p: mx.quantized_matmul(
                 v, w[p]["weight"], w[p]["scales"], w[p]["biases"],

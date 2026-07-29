@@ -168,15 +168,52 @@ grouped tokens; bit-identity against the resident block still prints
 `0.000e+00` (`--index models/m25-allhot.idx --layer 1`), with the gather_qmm
 kernel gap unchanged at 7.812e-03.
 
+## Threading the fetch
+
+The router hands over the whole routed set before any of it is needed, so the
+misses do not have to be discovered one at a time. `get_many` takes the batch,
+evicts once for the total, and issues every read through a pool of 8.
+
+Same ceiling, same prompt, same index — only the fetch changed:
+
+| | serial | 8 threads |
+|---|---|---|
+| prefill | 0.52 tok/s | **0.73** |
+| decode | 0.49 tok/s | **0.56** |
+| pread | 24.2s | **12.7s** |
+| numpy->mx | 9.2s | 12.8s |
+| eval | 0.3s | 0.2s |
+| total | 42.5s | 35.5s |
+| rss | 2.96 GB | 4.66 GB |
+
+Hit rate, bytes read and evictions are unchanged to three digits (40.7%, 26.45
+GB, 5591 against 5592), which is the check that this changed only the fetch:
+same reads, issued differently.
+
+**2.93 GB/s, not the 4.00-4.66 `bw.py` reports.** That benchmark reads uniform
+4.42 MB blocks. An expert is nine reads — three weights of a few MB each and six
+scale/bias arrays of a few KB — so most of the queue is small reads that never
+reach streaming bandwidth. The remaining factor is in the block size, not in
+more threads.
+
+**The cost moved rather than vanished: `numpy->mx` is now the largest single
+line, and it went up.** 37 GB at 2.9 GB/s against a 120 GB/s bus is not
+bandwidth — it is ~50k separate `mx.array` allocations at ~256 us each. It got
+worse because a batch holds every raw buffer alive at once where the serial path
+reused one hot page, which is also where the 1.7 GB of extra RSS comes from.
+
 ## Open
 
-- The fetch is serial: 1.54 GB/s where the disk gives 4.0+. Threading the
-  per-expert reads to the measured cap of 8 is the one change with a factor in
-  it, and it is worth roughly half the runtime.
-- `rss 2.96 GB` under a 6.00 GB store-accounted peak: mlx's Metal buffers are
-  not landing in RSS, so the two numbers are measuring different things and
-  process RSS is no longer the independent check on the ceiling it was meant
-  to be.
+- `numpy->mx` at 12.8s, ~256 us per array, is the next factor. It is allocator
+  pressure, not the memory bus: one buffer per expert, sliced, or a free-list
+  fed by evictions.
+- The per-batch raw buffers are a real second tier that the ceiling does not
+  account for: 278 MB transient at the widest prefill layer. Small, but it is
+  exactly the kind of unaccounted residency the ceiling exists to forbid.
+- `rss 2.96 GB` under a 6.00 GB store-accounted peak (serial run): mlx's Metal
+  buffers are not landing in RSS, so the two numbers are measuring different
+  things and process RSS is no longer the independent check on the ceiling it
+  was meant to be.
 - Decode's 40.7% is 21 slots/layer at a 6 GB ceiling. The 58-slot design point
   needs ~16 GB free and has not been run.
 - GNP measured on layers 1 and 3 only, 24 tokens. Layers past ~5 need every
