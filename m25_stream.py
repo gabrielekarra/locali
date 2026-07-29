@@ -26,6 +26,7 @@ from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 
 from m25_store import M25Store, PROJS
 from neuron_tail_live import build_n_layers
@@ -43,6 +44,12 @@ class StreamingMoE:
     # boundary serialises what mlx would otherwise fuse. Read the SPLIT it
     # gives, not its total -- the total is higher than a real run.
     prof = None
+    # When true the block computes with ONLY the experts already resident and
+    # renormalises the gates over them, reading nothing. That is a complete
+    # forward pass at zero disk cost -- an approximation whose quality is
+    # exactly how warm the cache is. Used to draft tokens for speculative
+    # decoding, where the cache becomes its own draft model.
+    draft = False
 
     def __init__(self, store: M25Store, layer: int, gate, bias, top_k: int):
         self.store, self.layer, self.gate = store, layer, gate
@@ -91,6 +98,18 @@ class StreamingMoE:
         for t, row in enumerate(ii):
             for slot, e in enumerate(row):
                 routed.setdefault(e, []).append((t, slot))
+
+        if StreamingMoE.draft:
+            routed = {e: u for e, u in routed.items()
+                      if (self.layer, e) in self.store.cache}
+            if not routed:
+                return x                      # nothing resident: pass through
+            keep = np.zeros(gg.shape, dtype=np.float32)
+            for uses in routed.values():
+                for t, slot in uses:
+                    keep[t, slot] = 1.0
+            kept = gg * mx.array(keep)
+            gg = kept / (mx.sum(kept, axis=-1, keepdims=True) + 1e-20)
         t0 = self._tick("group", t0)
 
         # Experts are consumed as they land, not after the last one arrives, so

@@ -1,0 +1,50 @@
+{
+  "8": {
+    "err_drop_smallest": 5.382764101113935e-08,
+    "err_cache_aware": 5.382764101113935e-08,
+    "miss_per_token_oracle": 4.15625,
+    "miss_per_token_cache": 4.15625
+  },
+  "7": {
+    "err_drop_smallest": 0.11438170075416565,
+    "err_cache_aware": 0.09565321356058121,
+    "miss_per_token_oracle": 3.5625,
+    "miss_per_token_cache": 3.15625
+  },
+  "6": {
+    "err_drop_smallest": 0.22847138345241547,
+    "err_cache_aware": 0.22807347774505615,
+    "miss_per_token_oracle": 3.09375,
+    "miss_per_token_cache": 2.15625
+  },
+  "5": {
+    "err_drop_smallest": 0.3933045566082001,
+    "err_cache_aware": 0.4325051009654999,
+    "miss_per_token_oracle": 2.5625,
+    "miss_per_token_cache": 1.21875
+  },
+  "4": {
+    "err_drop_smallest": 0.6531734466552734,
+    "err_cache_aware": 0.5465795397758484,
+    "miss_per_token_oracle": 1.90625,
+    "miss_per_token_cache": 0.46875
+  },
+  "3": {
+    "err_drop_smallest": 1.0834742784500122,
+    "err_cache_aware": 0.5982526540756226,
+    "miss_per_token_oracle": 1.4375,
+    "miss_per_token_cache": 0.15625
+  },
+  "2": {
+    "err_drop_smallest": 1.7949260473251343,
+    "err_cache_aware": 0.6207579374313354,
+    "miss_per_token_oracle": 0.96875,
+    "miss_per_token_cache": 0.0
+  },
+  "1": {
+    "err_drop_smallest": 3.705965280532837,
+    "err_cache_aware": 0.6207579374313354,
+    "miss_per_token_oracle": 0.46875,
+    "miss_per_token_cache": 0.0
+  }
+}

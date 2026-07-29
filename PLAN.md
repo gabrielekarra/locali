@@ -122,6 +122,100 @@ machinery — NOTES already says the published numbers come from exactly that an
 are not comparable. On 24 GB against a 4.66 GB/s disk, the ceiling at full
 quality is 5-7 tok/s.
 
+## Four experiments against the bound
+
+The bound is `bytes/token = layers x top_k x (1-hit) x bytes_per_expert`. The
+first draft of this document treated every term as given. Three of them were
+attacked directly and one assumption turned out to be wrong — but not the one
+expected.
+
+### 1. Factor the experts: shared basis + residual — DEAD
+
+Every system in the literature treats an expert as atomic; they change when it
+moves, which one, at what precision. None changes what an expert *is* on disk.
+If `W_e = B + D_e` with `B` resident (62 layers x 8 MB = 0.5 GB), only `D_e`
+streams and `bytes_per_expert` collapses.
+
+`basis_probe.py`, layer 1, gate_proj, 256 experts:
+
+| | |
+|---|---|
+| mean pairwise cosine | +0.096 |
+| after mean subtraction | `\|\|D_e\|\|/\|\|W_e\|\| = 0.9859` |
+| rank 1 / 32 / 128 energy | 24.3% / 56.1% / 83.1% |
+
+**The experts are near-orthogonal.** Mean subtraction is worth 0.02 bits per
+weight. Reaching a 0.41 residual takes rank 128 of 256, a basis costing more
+than the experts it factors. The 4.42 MB is real.
+
+### 2. Skip experts the cache does not have — DEAD
+
+An expert contributes `gate_e * f_e(x)`, and a resident expert is free while a
+missing one is 4.42 MB and a stall. So the rule matching the cost structure is
+*skip iff not resident AND gate below threshold* — putting the quality loss
+exactly where the speed gain is. HOBBIT picks precision by gate magnitude, DALI
+picks placement by workload; neither lets residency decide whether to evaluate.
+
+`gate_drop.py` measures the gate distribution first, and it ends the idea:
+
+| slot | 1 | 2 | 4 | 6 | 8 |
+|---|---|---|---|---|---|
+| mean gate | 0.192 | 0.146 | 0.120 | 0.107 | 0.093 |
+| cumulative | 19.2% | 33.7% | 58.6% | 80.6% | 100% |
+
+**The gates are nearly flat** — 2x from first to eighth. M2.5 routes sigmoid
+top-8, not the skewed softmax top-2 that the adaptive-k literature assumes.
+Dropping one expert costs 11.4% block error; keeping four costs 65%, worse than
+2-bit quantization. Every one of the eight genuinely matters.
+
+### 3. The cache as its own draft model — DEAD
+
+The resident 8 GB is a complete model at zero disk cost: skip non-resident
+experts, renormalise, and a full forward pass reads nothing. Draft with the
+cache, verify a batch against the disk. No second model, no extra memory, and it
+improves as the cache warms.
+
+Measured at a 5 GB ceiling, 42.9% hit, 24 steps: draft **189 ms/token against
+1053** — 5.6x — at **16.7% acceptance**. Speculation needs roughly α > 0.5 to
+pay; at 0.167 with k=4 a verify plus four drafts buys 1.2 accepted tokens and is
+slower than not drafting. Consequence of #2: skipping 57% of a flat-gated top-8
+destroys the output.
+
+### 4. Routing correlation — the assumption that WAS wrong
+
+The batching table above assumed tokens route independently. They do not, and
+the 53% hit rate was already saying so: with an 8 GB cache holding ~1800 of
+15872 experts, independent routing would hit ~11%.
+
+Measured over 32 decode tokens (`results/seq_trace.json`), union of experts per
+layer over B consecutive tokens:
+
+| B | measured | if independent | GB/token |
+|---|---|---|---|
+| 1 | 8.0 | 8.0 | 2.192 |
+| 4 | 22.5 | 30.5 | 1.541 |
+| 8 | 35.0 | 57.4 | 1.200 |
+| 16 | 54.3 | 102.0 | 0.930 |
+| 32 | 81.8 | 163.3 | **0.701** |
+
+33.4% of a token's top-8 is shared with the previous token, and the union grows
+at **half** the independent rate. **Batching is worth 3.1x on bytes, not the
+1.6x claimed above.** At B=32 with a 53% hit that is ~0.33 GB/token — about 14
+tok/s — and B=64 crosses 20.
+
+## Revised conclusion
+
+The three ideas that would have bought single-stream latency all died on the
+same fact: **M2.5's router is flat and its experts are orthogonal.** There is no
+redundancy to exploit inside a token. For latency, PLAN's ceiling of 4-6 tok/s
+stands.
+
+Across tokens there is redundancy, it is large, and it was under-measured.
+**20 tok/s is reachable as batch throughput** — B=32-64, which needs the stacked
+`gather_qmm` (launch cost amortises perfectly over the batch) and nothing else
+new. That is a different product than a fast chat loop: 32 completions at once,
+for generation, evaluation, or serving.
+
 ## What I would do
 
 Build #1 and #2. They are the two with real factors in them, they are

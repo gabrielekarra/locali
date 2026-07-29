@@ -146,6 +146,56 @@ def generate(model, store, tok, prompt, max_tokens):
     return tok.decode(out), t_prefill, t_decode, ids.size, pre, dec, marks
 
 
+def measure_draft(model, store, tok, prompt, n):
+    """Acceptance rate of the cache as its own draft model.
+
+    At each step the SAME state is decoded twice: once for real, and once with
+    every non-resident expert skipped and the gates renormalised over what is
+    left -- a full forward pass that reads nothing. Generation advances on the
+    true token, so this is the acceptance rate a speculative decoder would see,
+    not a compounding-divergence measurement.
+
+    If the cache drafts well, a verify pass over k drafted tokens costs about
+    what one token costs today (measured: the union of k consecutive tokens'
+    experts grows at half the independent rate), and single-stream latency stops
+    being one disk round-trip per token.
+    """
+    from mlx_lm.models.cache import make_prompt_cache
+
+    cache = make_prompt_cache(model)
+    ids = mx.array(tok(prompt)["input_ids"])
+    logits = model(ids[None], cache=cache)
+    mx.eval(logits)
+    y = int(mx.argmax(logits[0, -1]))
+
+    from mlx_lm.models.cache import trim_prompt_cache, can_trim_prompt_cache
+    assert can_trim_prompt_cache(cache), "cache cannot be rewound"
+
+    agree, drafted, t_draft, t_true = 0, [], 0.0, 0.0
+    for _ in range(n):
+        step = mx.array([[y]])
+        # Draft, then REWIND. Both passes consume the same position, so without
+        # the trim the second one would append a duplicate entry and every
+        # measurement after it would be against a corrupted context.
+        StreamingMoE.draft = True
+        t0 = time.perf_counter()
+        dl = model(step, cache=cache)
+        mx.eval(dl)
+        t_draft += time.perf_counter() - t0
+        d = int(mx.argmax(dl[0, -1]))
+        StreamingMoE.draft = False
+        trim_prompt_cache(cache, 1)
+
+        t0 = time.perf_counter()
+        logits = model(step, cache=cache)
+        mx.eval(logits)
+        t_true += time.perf_counter() - t0
+        y = int(mx.argmax(logits[0, -1]))
+        agree += int(d == y)
+        drafted.append((d, y))
+    return agree / n, t_draft / n, t_true / n, drafted
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--snap", required=True)
@@ -155,6 +205,8 @@ def main():
     ap.add_argument("--prompt", default="The capital of France is")
     ap.add_argument("--trace-out", help="write the routing histogram here")
     ap.add_argument("--threads", type=int, default=8)
+    ap.add_argument("--measure-draft", type=int, default=0,
+                    help="acceptance rate of the resident cache as a draft model")
     ap.add_argument("--profile", action="store_true",
                     help="attribute time inside the MoE block; forces an\n                          eval at each boundary, so the run is slower")
     a = ap.parse_args()
@@ -176,6 +228,19 @@ def main():
                                              trace=bool(a.trace_out),
                                              threads=a.threads)
     print(f"dense core resident: {core:.2f} GB  (loaded in {time.perf_counter()-t0:.0f}s)")
+
+    if a.measure_draft:
+        acc, td, tt, pairs = measure_draft(model, store, tok, a.prompt,
+                                           a.measure_draft)
+        print(f"\ncache-as-draft over {a.measure_draft} steps")
+        print(f"  acceptance {acc*100:.1f}%   draft {td*1000:.0f} ms/token  "
+              f"true {tt*1000:.0f} ms/token   ({tt/td:.1f}x)")
+        s = store.stats()
+        print(f"  hit {s['hit_rate']*100:.1f}%  peak {s['peak']/1e9:.2f} GB")
+        agree = [tok.decode([d]) for d, y in pairs if d == y][:12]
+        print(f"  accepted: {agree}")
+        store.close()
+        return
 
     if a.profile:
         StreamingMoE.prof = {}

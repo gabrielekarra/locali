@@ -47,6 +47,11 @@ class M25Store:
         # the hot/cold split needs how often the ROUTER picks an expert, not how
         # often the cache happened to miss it.
         self.trace = {} if trace else None
+        # Ordered record of what each layer call routed to. The counts
+        # above answer 'which experts are hot'; this answers 'how much do
+        # CONSECUTIVE tokens overlap', which is a different question and
+        # the one that decides whether batching pays.
+        self.seq = [] if trace else None
         self.t_convert = self.t_eval = 0.0
         # Wall time the caller spends BLOCKED on a read. Reads run on worker
         # threads and overlap compute, so total read time is no longer a
@@ -97,6 +102,7 @@ class M25Store:
             t = self.trace.setdefault(layer, {})
             for e in want:
                 t[e] = t.get(e, 0) + 1
+            self.seq.append((layer, want))
 
         miss, hit_keys = [], []
         for e in want:
@@ -209,7 +215,8 @@ class M25Store:
         total = sum(sum(d.values()) for d in self.trace.values())
         out = {"counts": {str(l): {str(e): n for e, n in d.items()}
                           for l, d in self.trace.items()},
-               "accesses": total, "layers": self.layers, "num_experts": self.E}
+               "accesses": total, "layers": self.layers, "num_experts": self.E,
+               "seq": self.seq}
         Path(path).write_text(json.dumps(out))
         return total
 
