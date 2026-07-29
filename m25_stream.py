@@ -50,24 +50,40 @@ class StreamingMoE:
         return inds, g / (mx.sum(g, axis=-1, keepdims=True) + 1e-20)
 
     def __call__(self, x):
+        """Two things make this fast enough to be worth having.
+
+        1. `quantized_matmul` runs on the PACKED weights. Dequantizing first
+           materialised 340M fp32 params per token per layer -- more traffic
+           than the weights themselves -- to compute a matvec.
+        2. Tokens are grouped BY EXPERT rather than looped over. Each expert is
+           fetched once per call and applied to every token routed to it, which
+           is what makes prefill cost one pass over the experts instead of one
+           pass per token.
+        """
         inds, gates = self.route(x)
-        flat = x.reshape(-1, x.shape[-1])
-        rows = []
-        ii = inds.reshape(-1, self.top_k)
+        flat = x.reshape(-1, x.shape[-1]).astype(mx.float32)
+        ii = inds.reshape(-1, self.top_k).tolist()
         gg = gates.reshape(-1, self.top_k).astype(mx.float32)
-        for t in range(flat.shape[0]):
-            xt = flat[t].astype(mx.float32)
-            acc = mx.zeros_like(xt)
-            for slot, e in enumerate(ii[t].tolist()):
-                w = self.store.get(self.layer, e)
-                bits = BITS[self.store.tier(self.layer, e)]
-                dq = lambda p: mx.dequantize(
-                    w[p]["weight"], w[p]["scales"], w[p]["biases"],
-                    group_size=GROUP, bits=bits).astype(mx.float32)
-                a = nn.silu(dq("gate_proj") @ xt) * (dq("up_proj") @ xt)
-                acc = acc + float(gg[t, slot]) * (dq("down_proj") @ a)
-            rows.append(acc)
-        return mx.stack(rows).reshape(x.shape).astype(x.dtype)
+
+        routed = {}
+        for t, row in enumerate(ii):
+            for slot, e in enumerate(row):
+                routed.setdefault(e, []).append((t, slot))
+
+        out = mx.zeros_like(flat)
+        for e, uses in routed.items():
+            w = self.store.get(self.layer, e)
+            bits = BITS[self.store.tier(self.layer, e)]
+            qm = lambda v, p: mx.quantized_matmul(
+                v, w[p]["weight"], w[p]["scales"], w[p]["biases"],
+                transpose=True, group_size=GROUP, bits=bits)
+            rows = mx.array([t for t, _ in uses])
+            xb = flat[rows]
+            h = nn.silu(qm(xb, "gate_proj")) * qm(xb, "up_proj")
+            y = qm(h, "down_proj")
+            g = mx.array([float(gg[t, slot]) for t, slot in uses])[:, None]
+            out = out.at[rows].add(y * g)
+        return out.reshape(x.shape).astype(x.dtype)
 
 
 def attach(model, store, layer):
@@ -81,26 +97,30 @@ def resident_same_path(blk, x, inds, gates, bits=4):
     the resident stacked tensors instead of from disk.
 
     This is the reference that makes bit-identity meaningful. Comparing against
-    mlx_lm's blk(x) would not: that path is gather_qmm on packed weights, a
-    genuinely different computation from dequantize-then-matmul, so it differs
-    by ~1e-2 no matter how correct the fetch is -- and a tolerance wide enough
-    to pass it would hide exactly the indexing bugs this check exists to catch.
+    mlx_lm's blk(x) would not: that path gathers from one stacked tensor in a
+    single kernel call, a different order of operations, so it differs by ~1e-2
+    no matter how correct the fetch is -- and a tolerance wide enough to pass it
+    would hide exactly the indexing bugs this check exists to catch.
     """
     sm = blk.switch_mlp
-    dq = lambda m, i: mx.dequantize(m.weight[i], m.scales[i], m.biases[i],
-                                    group_size=GROUP, bits=bits).astype(mx.float32)
-    flat = x.reshape(-1, x.shape[-1])
-    ii = inds.reshape(-1, inds.shape[-1])
+    flat = x.reshape(-1, x.shape[-1]).astype(mx.float32)
+    ii = inds.reshape(-1, inds.shape[-1]).tolist()
     gg = gates.reshape(-1, inds.shape[-1]).astype(mx.float32)
-    rows = []
-    for t in range(flat.shape[0]):
-        xt = flat[t].astype(mx.float32)
-        acc = mx.zeros_like(xt)
-        for slot, e in enumerate(ii[t].tolist()):
-            a = nn.silu(dq(sm.gate_proj, e) @ xt) * (dq(sm.up_proj, e) @ xt)
-            acc = acc + float(gg[t, slot]) * (dq(sm.down_proj, e) @ a)
-        rows.append(acc)
-    return mx.stack(rows).reshape(x.shape).astype(x.dtype)
+    routed = {}
+    for t, row in enumerate(ii):
+        for slot, e in enumerate(row):
+            routed.setdefault(e, []).append((t, slot))
+    out = mx.zeros_like(flat)
+    for e, uses in routed.items():
+        qm = lambda v, m: mx.quantized_matmul(
+            v, m.weight[e], m.scales[e], m.biases[e],
+            transpose=True, group_size=GROUP, bits=bits)
+        rows = mx.array([t for t, _ in uses])
+        xb = flat[rows]
+        h = nn.silu(qm(xb, sm.gate_proj)) * qm(xb, sm.up_proj)
+        g = mx.array([float(gg[t, slot]) for t, slot in uses])[:, None]
+        out = out.at[rows].add(qm(h, sm.down_proj) * g)
+    return out.reshape(x.shape).astype(x.dtype)
 
 
 def verify(snap, index_path, layer, tokens, ceiling_gb):

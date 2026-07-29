@@ -14,6 +14,7 @@ The rules from CLAUDE.md that this file exists to honour:
 
 import os
 import fcntl
+import time
 import json
 from collections import OrderedDict
 from pathlib import Path
@@ -29,7 +30,7 @@ NP = {"U32": np.uint32, "I32": np.int32, "F16": np.float16,
 
 
 class M25Store:
-    def __init__(self, index_path, ceiling_gb=8.0, nocache=True):
+    def __init__(self, index_path, ceiling_gb=8.0, nocache=True, trace=False):
         idx = json.loads(Path(index_path).read_text())
         self.meta = idx["experts"]
         self.layers, self.E = idx["layers"], idx["num_experts"]
@@ -40,6 +41,11 @@ class M25Store:
         self.fds, self._nocache = {}, nocache
         self.hits = self.misses = self.evictions = self.bytes_read = 0
         self.peak = 0
+        # Routing trace, counted on every access whether it hits or misses:
+        # the hot/cold split needs how often the ROUTER picks an expert, not how
+        # often the cache happened to miss it.
+        self.trace = {} if trace else None
+        self.t_pread = self.t_convert = self.t_eval = 0.0
 
     def _fd(self, root, shard):
         key = (root, shard)
@@ -54,12 +60,18 @@ class M25Store:
 
     def _read(self, rec):
         root, shard, off, nbytes, shape, dt = rec
+        t0 = time.perf_counter()
         raw = os.pread(self._fd(root, shard), nbytes, off)
         if len(raw) != nbytes:
             raise IOError(f"short read {len(raw)}/{nbytes} at {shard}+{off}")
+        t1 = time.perf_counter()
         a = np.frombuffer(raw, dtype=NP[dt]).reshape(shape)
         arr = mx.array(a)
-        return arr.view(mx.bfloat16) if dt == "BF16" else arr
+        out = arr.view(mx.bfloat16) if dt == "BF16" else arr
+        t2 = time.perf_counter()
+        self.t_pread += t1 - t0
+        self.t_convert += t2 - t1
+        return out
 
     def tier(self, layer, expert):
         """'hot' (served from the 4-bit snapshot) or 'cold' (2-bit pack)."""
@@ -70,6 +82,9 @@ class M25Store:
 
     def get(self, layer, expert):
         key = (layer, expert)
+        if self.trace is not None:
+            self.trace.setdefault(layer, {})
+            self.trace[layer][expert] = self.trace[layer].get(expert, 0) + 1
         if key in self.cache:
             self.hits += 1
             self.cache.move_to_end(key)
@@ -86,7 +101,9 @@ class M25Store:
             self.resident -= sum(v.nbytes for d in ev.values() for v in d.values())
             self.evictions += 1
         val = {p: {k: self._read(m[p][k]) for k in ARRS} for p in PROJS}
+        t0 = time.perf_counter()
         mx.eval([v for d in val.values() for v in d.values()])
+        self.t_eval += time.perf_counter() - t0
         self.cache[key] = val
         self.resident += need
         self.bytes_read += need
@@ -100,7 +117,18 @@ class M25Store:
                 "hit_rate": self.hits / t if t else 0.0,
                 "evictions": self.evictions, "bytes_read": self.bytes_read,
                 "resident": self.resident, "peak": self.peak,
-                "slots": len(self.cache)}
+                "slots": len(self.cache), "t_pread": self.t_pread,
+                "t_convert": self.t_convert, "t_eval": self.t_eval}
+
+    def dump_trace(self, path):
+        """Routing histogram in the shape build_index.py --trace expects."""
+        assert self.trace is not None, "store was not built with trace=True"
+        total = sum(sum(d.values()) for d in self.trace.values())
+        out = {"counts": {str(l): {str(e): n for e, n in d.items()}
+                          for l, d in self.trace.items()},
+               "accesses": total, "layers": self.layers, "num_experts": self.E}
+        Path(path).write_text(json.dumps(out))
+        return total
 
     def close(self):
         for fd in self.fds.values():

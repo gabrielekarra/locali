@@ -127,11 +127,58 @@ the framework kernel can only ever be a tolerance check, and a tolerance wide
 enough to pass 7.8e-3 would hide any indexing bug worth catching. Holding the
 arithmetic fixed so the only variable is the fetch gives **0.000e+00**.
 
+## Generation, with a KV cache and a trace-derived index
+
+`m25_engine.py`, 6 GB ceiling — the same peak the run above hit, so the cache
+size is held fixed and the only variables are the batching, the KV cache and the
+index built from the routing trace:
+
+```
+dense core resident: 2.73 GB  (loaded in 1s)
+prefill 5 tokens in 9.7s (0.52 tok/s)
+  hit 0.0%  read 10.79 GB
+decode 16 tokens in 32.9s (0.49 tok/s)
+  hit 40.7%  read 26.46 GB (1.65 GB/token)
+  evictions 5592  peak 6.00 GB  rss 2.96 GB
+  where the time went: pread 24.2s  numpy->mx 9.2s  eval 0.3s = 33.8s of 42.5s (79%)
+
+The capital of France is Paris. The official language is French. The currency
+is the Euro. The population
+```
+
+Prefill and decode are reported separately because they are different regimes:
+prefill touches most experts of every layer, decode touches top-k, and one
+averaged tok/s hides both.
+
+**Prefill's 0.0% against the earlier 22.5% is the batching, not a regression.**
+The old path looped over tokens and re-fetched the same expert once per token,
+so a five-token prefill scored hits on its own repeats. Grouping tokens by
+expert fetches each one once per layer call and leaves no repeat to hit. Same
+bytes, honest denominator.
+
+**Where it actually goes: 24.2s of pread is 37.25 GB at 1.54 GB/s**, against the
+4.00-4.66 GB/s `bw.py` measures on this disk. The reads are serial and
+single-threaded, one array at a time, at a block size well under an expert.
+Nothing about the cache or the policy is the bottleneck — the fetch is. The
+`numpy->mx` 9.2s is 4.0 GB/s of memcpy, close to `t_ram` and not going away
+without reading into a buffer mlx already owns.
+
+**Correctness after the rewrite.** Both paths moved to `quantized_matmul` on
+grouped tokens; bit-identity against the resident block still prints
+`0.000e+00` (`--index models/m25-allhot.idx --layer 1`), with the gather_qmm
+kernel gap unchanged at 7.812e-03.
+
 ## Open
 
-- No generation loop: one forward pass, no KV cache, so no real tok/s and no
-  routing trace.
-- The hot/cold split in the index is an arbitrary placeholder pending that trace.
+- The fetch is serial: 1.54 GB/s where the disk gives 4.0+. Threading the
+  per-expert reads to the measured cap of 8 is the one change with a factor in
+  it, and it is worth roughly half the runtime.
+- `rss 2.96 GB` under a 6.00 GB store-accounted peak: mlx's Metal buffers are
+  not landing in RSS, so the two numbers are measuring different things and
+  process RSS is no longer the independent check on the ceiling it was meant
+  to be.
+- Decode's 40.7% is 21 slots/layer at a 6 GB ceiling. The 58-slot design point
+  needs ~16 GB free and has not been run.
 - GNP measured on layers 1 and 3 only, 24 tokens. Layers past ~5 need every
   preceding layer resident, which does not fit — so the deep-layer answer waits
   on the engine. Both GNP and quantization get worse with depth, so the
