@@ -123,5 +123,60 @@ def main():
         print("  measured LRU: 49.1% at 8 GB, 53.0% at 9, 61.7% at 10")
 
 
+def hit_needed(target, mb=COLD_MB, disk=DISK_BLOCK):
+    """Hit rate required to hit `target` tok/s if the disk were the ONLY cost.
+
+    This is the question that decides whether a target is reachable at all: a
+    token must touch layers x top_k experts, and every one that misses is a
+    read. No amount of overlap, batching or kernel work moves it, because it is
+    the bytes themselves against the bandwidth.
+    """
+    budget_gb = disk / target                       # GB we may read per token
+    full_gb = LAYERS * TOP_K * mb / 1000            # every expert a miss
+    return 1 - budget_gb / full_gb, budget_gb, full_gb
+
+
+def union_experts(batch, e=256, k=TOP_K):
+    """Distinct experts a batch of tokens routes to in one layer. Batching
+    amortises kernel launches perfectly but bytes only partly: the union grows
+    nearly linearly in batch until it saturates the layer."""
+    return e * (1 - (1 - k / e) ** batch)
+
+
+def feasibility():
+    print("=== is 20 tok/s reachable")
+    print("  a token touches 62 x 8 = 496 experts; misses are reads\n")
+    for target in (2, 5, 10, 20):
+        h, budget, full = hit_needed(target)
+        verdict = "" if h < 0.95 else "   <-- beyond any cache"
+        print(f"  {target:2d} tok/s: {budget*1000:6.0f} MB/token of a "
+              f"{full:.2f} GB working set -> hit rate {h*100:5.1f}%{verdict}")
+    print()
+    print("  measured: 49.1% at 8 GB, 61.7% at 10 GB. Cache buys ~6 points/GB")
+    print("  and the machine has 24 GB total with a 2.3 GB core to hold.")
+    print()
+
+    print("=== does batching rescue it")
+    print("  kernel launches amortise perfectly; bytes do not")
+    for b in (1, 4, 8, 16, 32, 64):
+        u = union_experts(b)
+        gb = LAYERS * u * COLD_MB / 1000 / b
+        print(f"  batch {b:2d}: {u:5.1f} experts/layer -> {gb:.2f} GB/token "
+              f"({gb/ (LAYERS*TOP_K*COLD_MB/1000):.2f}x of unbatched)")
+    print("  a batch large enough to matter reads the whole layer, and the")
+    print("  per-token saving stalls near 2x while the cache stops working.")
+    print()
+
+    print("=== what the compute floor actually is")
+    flop = TOP_K * 3 * 3072 * 1536 * 2 * LAYERS / 1e9
+    print(f"  {flop:.2f} GFLOP/token of expert matmul, measured at 0.25 s/token")
+    print(f"  -> {flop/0.25:.1f} GFLOP/s on hardware rated in the TFLOPs.")
+    print("  Compute is not FLOP-bound, it is launch-bound: 62 x 8 x 3 = 1488")
+    print("  matvec kernels per token. THAT is what batching fixes, and it is")
+    print("  worth ~0.36 s/token -- real, but it is not the binding constraint.")
+
+
 if __name__ == "__main__":
     main()
+    print()
+    feasibility()
