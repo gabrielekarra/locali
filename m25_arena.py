@@ -142,6 +142,28 @@ class ArenaStore:
 
     def slots_for(self, layer, experts):
         """{expert: (tier, slot)}, every one resident on return."""
+        placed, futs = self.submit(layer, experts)
+        self.wait(futs)
+        return placed
+
+    def wait(self, futs):
+        if not futs:
+            return
+        t0 = time.perf_counter()
+        for f in futs:
+            f.result()
+        self.t_stall += time.perf_counter() - t0
+
+    def submit(self, layer, experts):
+        """Claim slots now, return before the bytes arrive.
+
+        Slots are claimed synchronously so a later submit cannot steal one an
+        earlier submit is still filling; only the reads are deferred. That is
+        what lets a caller queue several chunks of a layer and compute on the
+        first while the rest are in flight -- the arena path was otherwise
+        strictly read-everything-then-gather, which at batch 512 was ~32s of
+        disk followed by ~30s of compute with neither covering the other.
+        """
         want = list(dict.fromkeys(experts))
         out, miss = {}, []
         for e in want:
@@ -176,16 +198,13 @@ class ArenaStore:
                     jobs.append((rec, self.mv[(t, p, k)][s * nb:(s + 1) * nb]))
             self.bytes_read += self.item[t]
 
-        if jobs:
-            # Issue order is deliberately NOT sorted by disk offset. That was
-            # tried -- at batch 32 a layer's reads are a sweep over its experts,
-            # so ascending order looked free -- and measured 1.95 tok/s against
-            # 2.07 unsorted. With eight reads already in flight the drive does
-            # its own scheduling and the sort only costs.
-            t0 = time.perf_counter()
-            list(self.pool.map(lambda j: self._read_into(*j), jobs))
-            self.t_stall += time.perf_counter() - t0
-        return out
+        # Issue order is deliberately NOT sorted by disk offset. That was tried
+        # -- at batch 32 a layer's reads are a sweep over its experts, so
+        # ascending order looked free -- and measured 1.95 tok/s against 2.07
+        # unsorted. With eight reads already in flight the drive does its own
+        # scheduling and the sort only costs.
+        futs = [self.pool.submit(self._read_into, *j) for j in jobs]
+        return out, futs
 
     def stats(self):
         n = self.hits + self.misses
@@ -229,15 +248,35 @@ class ArenaMoE:
         g = mx.take_along_axis(scores, inds, axis=-1)
         return inds, g / (mx.sum(g, axis=-1, keepdims=True) + 1e-20)
 
+    # Tokens per chunk. One chunk means the old behaviour: read the whole layer,
+    # then gather. More chunks let the gather on chunk c run while c+1 is still
+    # coming off disk, which is the only overlap available -- layer L+1 cannot
+    # start early because its router needs layer L's output.
+    chunk = 128
+
     def __call__(self, x):
-        inds, gates = self.route(x)
         shape = x.shape
         flat = x.reshape(-1, shape[-1])
-        ii = inds.reshape(-1, self.top_k).tolist()
         T = flat.shape[0]
+        if T > self.chunk:
+            return self._chunked(x, flat, shape, T)
 
+        inds, gates = self.route(x)
+        ii = inds.reshape(-1, self.top_k).tolist()
         placed = self.store.slots_for(self.layer, [e for row in ii for e in row])
+        sc = gates.reshape(T, self.top_k).astype(x.dtype)
+        out = self._apply(flat, ii, placed, sc, shape[-1], x.dtype)
+        return out.reshape(shape).astype(x.dtype)
 
+    def _apply(self, flat, ii, placed, sc, d, dtype):
+        """The gather itself, for one contiguous run of tokens.
+
+        `sc` is already cast to x.dtype: mlx_lm casts the normalised scores
+        BEFORE weighting, and swiglu is one fused op rather than a separate
+        silu-then-multiply, which rounds differently. Both are copied exactly,
+        and together they are why bit-identity against the framework holds.
+        """
+        T = len(ii)
         slot = {t: np.zeros((T, self.top_k), dtype=np.uint32)
                 for t in self.store.tiers}
         mask = {t: np.zeros((T, self.top_k), dtype=np.float32)
@@ -247,28 +286,72 @@ class ArenaMoE:
                 t, s = placed[e]
                 slot[t][ti, ki] = s
                 mask[t][ti, ki] = 1.0
+        present = [t for t in self.store.tiers if mask[t].any()]
 
-        xin = mx.expand_dims(flat, (-2, -3))          # [T, 1, 1, d]
-        # mlx_lm casts the normalised scores to x.dtype BEFORE weighting, and
-        # applies swiglu as one fused op. Both are copied exactly: a separate
-        # silu-then-multiply rounds differently, and that alone would put the
-        # bit-identity check out of reach.
-        sc = gates.reshape(T, self.top_k).astype(x.dtype)
-        out = None
-        for t in self.store.tiers:
-            if not mask[t].any():
-                continue
-            idx = mx.array(slot[t])
-            A = lambda p, k: self.store.arena[(t, p, k)]
-            qm = lambda v, p: mx.gather_qmm(
-                v, A(p, "weight"), A(p, "scales"), A(p, "biases"),
-                rhs_indices=idx, transpose=True, group_size=GROUP, bits=BITS[t])
-            h = SWIGLU(qm(xin, "up_proj"), qm(xin, "gate_proj"))
-            y = qm(h, "down_proj").squeeze(-2)        # [T, k, d]
-            w = sc * mx.array(mask[t]).astype(x.dtype)
-            part = (y * w[..., None]).sum(axis=-2)
-            out = part if out is None else out + part
-        return out.reshape(shape).astype(x.dtype)
+        if len(present) == 1:
+            # One tier: the [T, k] grid is exactly the work required, and the
+            # reduction is mlx_lm's own. This is the path `verify` exercises,
+            # and the reason bit-identity survives at all.
+            t = present[0]
+            y = self._gather(t, mx.expand_dims(flat, (-2, -3)),
+                             mx.array(slot[t])).squeeze(-2)      # [T, k, d]
+            return (y * sc[..., None]).sum(axis=-2)
+
+        # Both tiers. Computing the full [T, k] grid for each and masking the
+        # other away costs nothing in launches and exactly 2x in FLOPs -- the
+        # right trade at batch 1, where the machine measured 56 GFLOP/s and
+        # launches dominated, and the wrong one at batch 256 where the disk has
+        # slack and the gather binds. So take only each tier's own entries.
+        #
+        # Accumulated in float32. The masked path summed a token's k terms in
+        # one reduction; this scatter-adds them, and eight sequential roundings
+        # in bfloat16 cost 1.4e-3 relative -- bfloat16 working as specified, but
+        # there is no reason to pay it when the accumulator can be wider.
+        out = mx.zeros((T, d), dtype=mx.float32)
+        gflat = sc.reshape(-1).astype(mx.float32)
+        for t in present:
+            ent = np.argwhere(mask[t] > 0)                       # [n, 2]
+            rows = mx.array(ent[:, 0])
+            idx = mx.array(slot[t][ent[:, 0], ent[:, 1]])[:, None]
+            xin = mx.expand_dims(flat[rows], (-2, -3))           # [n, 1, 1, d]
+            y = self._gather(t, xin, idx).reshape(len(ent), d)
+            g = gflat[mx.array(ent[:, 0] * self.top_k + ent[:, 1])]
+            out = out.at[rows].add(y.astype(mx.float32) * g[:, None])
+        return out.astype(dtype)
+
+    def _chunked(self, x, flat, shape, T):
+        """Queue every chunk's reads, then gather them in order.
+
+        Claiming happens inside submit, so all chunks own their slots before any
+        byte lands and no chunk can evict another. Only the waiting is staggered.
+        """
+        inds, gates = self.route(x)
+        ii = inds.reshape(-1, self.top_k).tolist()
+        sc_all = gates.reshape(T, self.top_k).astype(x.dtype)
+
+        pending = []
+        for lo in range(0, T, self.chunk):
+            hi = min(lo + self.chunk, T)
+            rows = [e for row in ii[lo:hi] for e in row]
+            placed, futs = self.store.submit(self.layer, rows)
+            pending.append((lo, hi, placed, futs))
+
+        parts = []
+        for lo, hi, placed, futs in pending:
+            self.store.wait(futs)
+            y = self._apply(flat[lo:hi], ii[lo:hi], placed, sc_all[lo:hi],
+                            shape[-1], x.dtype)
+            parts.append(y)
+            mx.async_eval(y)
+        return mx.concatenate(parts, axis=0).reshape(shape).astype(x.dtype)
+
+    def _gather(self, t, xin, idx):
+        A = lambda p, k: self.store.arena[(t, p, k)]
+        qm = lambda v, p: mx.gather_qmm(
+            v, A(p, "weight"), A(p, "scales"), A(p, "biases"),
+            rhs_indices=idx, transpose=True, group_size=GROUP, bits=BITS[t])
+        h = SWIGLU(qm(xin, "up_proj"), qm(xin, "gate_proj"))
+        return qm(h, "down_proj")
 
 
 def verify(snap, index_path, layer, tokens, ceiling_gb, hot_share):

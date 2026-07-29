@@ -270,6 +270,9 @@ def main():
     ap.add_argument("--batch", type=int, default=1,
                     help="decode this many independent sequences at once")
     ap.add_argument("--prompt-len", type=int, default=16)
+    ap.add_argument("--chunk", type=int, default=512,
+                    help="tokens per fetch/gather chunk; smaller overlaps "
+                         "more disk but splits the gather into weaker kernels")
     ap.add_argument("--arena", action="store_true",
                     help="preallocated unified-memory arena + gather_qmm")
     ap.add_argument("--hot-share", type=float, default=0.33,
@@ -313,6 +316,8 @@ def main():
         print(f"  accepted: {agree}")
         store.close()
         return
+
+    ArenaMoE.chunk = a.chunk
 
     if a.batch > 1:
         texts, t_pre, t_dec, n_pre, pre, dec, marks = generate_batch(

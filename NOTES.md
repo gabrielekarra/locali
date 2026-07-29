@@ -432,6 +432,59 @@ was correct at batch 1 and is wrong at 256.
 routing order measured 1.95 tok/s against 2.07 at B=32. With eight reads already
 in flight the drive schedules better than the sort does.
 
+### Splitting the tiers instead of masking them
+
+Running both tiers over the whole `[T, k]` grid with the other's gates zeroed is
+free in launches and exactly 2x in FLOPs. That was right at batch 1, where the
+machine measured 56 GFLOP/s and launches dominated, and wrong once the disk had
+slack. Taking only each tier's own entries:
+
+| B=256 | masked | split |
+|---|---|---|
+| decode | 5.74 tok/s | **6.85** |
+| prefill (2048 tok) | 7.0 tok/s | **21.1** |
+
+Prefill gains 3x because its grids are the largest. The single-tier case keeps
+the old `[T, k]` path, which is exactly the work required and preserves mlx_lm's
+reduction -- that is what keeps `verify` at 0.000e+00.
+
+**The split path disagreed with the masked one at 1.4e-3 relative before it was
+right to believe.** That is bfloat16 working as specified: the masked path sums a
+token's k terms in one reduction, the split path scatter-adds them, and eight
+sequential roundings cost about that much. Accumulating in float32 makes the two
+agree at **0.000e+00**, so the logic was correct and the precision was not.
+
+| B | GB/token | tok/s (split) |
+|---|---|---|
+| 256 | 0.257 | 6.85 |
+| 512 | 0.143 | 8.31 |
+
+At B=512 the read rate is 2.29 GB/s against 2.62 available, so bytes and compute
+now alternate as the constraint rather than one dominating.
+
+### Chunking: helps prefill, hurts decode
+
+The arena path is strictly read-everything-then-gather -- at B=512 about 32s of
+disk followed by 30s of compute per pass, neither covering the other. Splitting a
+layer's tokens into chunks, claiming all slots up front and staggering only the
+waits, overlaps them:
+
+| chunk=128, B=512 | serial | chunked |
+|---|---|---|
+| prefill (4096 tok) | 12.1 tok/s | **18.3** |
+| decode | **8.31 tok/s** | 7.05 |
+| blocked on disk | 129.2s | 88.3s |
+
+41s of disk really is hidden, and decode still loses: four gathers of 128 tokens
+are weaker kernels than one of 512, and the penalty exceeds the overlap. Prefill,
+whose grids are 4096 wide, has room to give. So the chunk is a knob (`--chunk`),
+not a constant, and it wants to be no smaller than the decode batch.
+
+**Careful with the hit rate under chunking:** it reads 67.5% where the same run
+unchunked read 0%. Bytes read are identical (292.98 GB against 293.22), so that
+is chunks re-requesting each other's experts and counting as hits, not reuse.
+The bytes are the honest number.
+
 ## Open
 
 - The 58-slot design point (~16 GB ceiling) still has not been run: the guard
