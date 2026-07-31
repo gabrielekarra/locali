@@ -1,0 +1,10 @@
+dense core resident: 3.69 GB  (loaded in 0s)
+
+batch 1472, prefill 1472 tokens in 40.1s (36.7 tok/s)
+  hit 0.0%  read 11.01 GB
+decode 2944 tokens (2 x 1472) in 173.0s -> 17.01 tok/s aggregate, 0.01 per sequence
+  hit 0.0%  read 85.32 GB (0.029 GB/token)
+  evictions 17502  arena 1.41 GB  blocked on disk 24.7s of 213.2s
+  mlx active 3.69 GB
+  seq0: ']~!b[BQUM'
+  seq1: '’t|'

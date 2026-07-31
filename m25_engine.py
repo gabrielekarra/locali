@@ -35,15 +35,73 @@ DENSE_PREFIXES = ("model.embed_tokens", "model.norm", "lm_head")
 # Ceiling on the DENSE core at load, checked against mlx's accounting
 # rather than RSS -- see load_streaming.
 CORE_LIMIT_GB = 12.0
+# Measured dense allocation after the routed experts are removed. The wide-
+# batch preflight adds this to the hard arena, exact KV capacity, live output
+# tensors, and explicit transient headroom.
+DENSE_CORE_GB = 2.30
 
 
 def rss_gb():
     return psutil.Process().memory_info().rss / 1e9
 
 
+def make_sized_prompt_cache(model, capacity):
+    """Allocate only the KV positions this run can consume.
+
+    MLX's default KVCache grows in blocks of 256 positions. At serving batches
+    in the thousands that unused tail is tens of gigabytes. The generation
+    loops know their prompt and decode ceilings, so the per-instance step can be
+    exact without dropping a key or value.
+    """
+    from mlx_lm.models.cache import make_prompt_cache
+
+    if capacity < 1:
+        raise ValueError("KV cache capacity must be positive")
+    cache = make_prompt_cache(model)
+    for layer_cache in cache:
+        if type(layer_cache).__name__ == "KVCache":
+            layer_cache.step = capacity
+    return cache
+
+
+def wide_batch_memory_gb(cfg, ceiling_gb, batch, capacity):
+    """Conservative resident-memory estimate for the exact-capacity batch path."""
+    head_dim = cfg.get("head_dim") or (
+        cfg["hidden_size"] // cfg["num_attention_heads"]
+    )
+    kv = (
+        2  # keys and values
+        * cfg["num_hidden_layers"]
+        * batch
+        * cfg["num_key_value_heads"]
+        * capacity
+        * head_dim
+        * 2  # bfloat16
+        / 1e9
+    )
+    logits = batch * cfg["vocab_size"] * 2 / 1e9
+    moe_terms = (
+        batch
+        * cfg["num_experts_per_tok"]
+        * cfg["hidden_size"]
+        * 4  # float32 mixed-tier accumulator
+        / 1e9
+    )
+    transient_headroom = 0.75
+    return (
+        ceiling_gb
+        + DENSE_CORE_GB
+        + kv
+        + logits
+        + moe_terms
+        + transient_headroom
+    )
+
+
 def load_streaming(snap: Path, index_path: str, ceiling_gb: float,
                    trace: bool = False, threads: int = 8,
-                   arena: bool = False, hot_share: float = 0.33):
+                   arena: bool = False, hot_share: float = 0.33,
+                   nocache: bool = True, cache_policy: str = "lru"):
     cfg = json.loads((snap / "config.json").read_text())
     q = cfg.pop("quantization")
     model = Model(ModelArgs.from_dict(cfg))
@@ -52,11 +110,12 @@ def load_streaming(snap: Path, index_path: str, ceiling_gb: float,
     # only large arrays the model can hold are dense ones.
     if arena:
         store = ArenaStore(index_path, ceiling_gb=ceiling_gb,
-                           hot_share=hot_share, threads=threads)
+                           hot_share=hot_share, threads=threads,
+                           nocache=nocache, cache_policy=cache_policy)
         Block = ArenaMoE
     else:
         store = M25Store(index_path, ceiling_gb=ceiling_gb, trace=trace,
-                         threads=threads)
+                         threads=threads, nocache=nocache)
         Block = StreamingMoE
     streamers = []
     for li, layer in enumerate(model.model.layers):
@@ -109,19 +168,20 @@ def load_streaming(snap: Path, index_path: str, ceiling_gb: float,
     # real residency; RSS is kept alongside because they disagree and the gap
     # is worth seeing.
     got, rss = mx.get_active_memory() / 1e9, rss_gb()
-    assert got < CORE_LIMIT_GB, (f"dense core alone took {got:.1f} GB of mlx "
-                                f"memory (rss says {rss:.1f}) -- aborting")
-    return model, store, cfg, got
+    dense = got - store.resident / 1e9
+    assert dense < CORE_LIMIT_GB, (
+        f"dense core alone took {dense:.1f} GB of mlx memory "
+        f"({got:.1f} GB including experts; rss says {rss:.1f}) -- aborting"
+    )
+    return model, store, cfg, dense
 
 
 def generate(model, store, tok, prompt, max_tokens):
     """Greedy decode with a KV cache. Reports prefill and decode separately
     because they are different regimes: prefill touches most experts of every
     layer, decode touches top-k, and averaging them hides both."""
-    from mlx_lm.models.cache import make_prompt_cache
-
-    cache = make_prompt_cache(model)
     ids = mx.array(tok(prompt)["input_ids"])
+    cache = make_sized_prompt_cache(model, ids.size + max_tokens)
 
     t0 = time.perf_counter()
     logits = model(ids[None], cache=cache)
@@ -167,8 +227,6 @@ def generate_batch(model, store, tok, n_seq, prompt_len, max_tokens):
     needed, and different content so the routing genuinely diverges. Feeding the
     same prompt n times would share every expert and report a fiction.
     """
-    from mlx_lm.models.cache import make_prompt_cache
-
     text = Path("eval/pride_prejudice.txt").read_text()
     all_ids = tok(text)["input_ids"]
     need = n_seq * prompt_len
@@ -176,7 +234,7 @@ def generate_batch(model, store, tok, n_seq, prompt_len, max_tokens):
     ids = mx.array([all_ids[i * prompt_len:(i + 1) * prompt_len]
                     for i in range(n_seq)])
 
-    cache = make_prompt_cache(model)
+    cache = make_sized_prompt_cache(model, prompt_len + max_tokens)
     t0 = time.perf_counter()
     logits = model(ids, cache=cache)
     mx.eval(logits)
@@ -222,10 +280,8 @@ def measure_draft(model, store, tok, prompt, n):
     experts grows at half the independent rate), and single-stream latency stops
     being one disk round-trip per token.
     """
-    from mlx_lm.models.cache import make_prompt_cache
-
-    cache = make_prompt_cache(model)
     ids = mx.array(tok(prompt)["input_ids"])
+    cache = make_sized_prompt_cache(model, ids.size + n)
     logits = model(ids[None], cache=cache)
     mx.eval(logits)
     y = int(mx.argmax(logits[0, -1]))
@@ -272,25 +328,57 @@ def main():
     ap.add_argument("--prompt-len", type=int, default=16)
     ap.add_argument("--arena", action="store_true",
                     help="preallocated unified-memory arena + gather_qmm")
-    ap.add_argument("--hot-share", type=float, default=0.33,
+    ap.add_argument("--hot-share", type=float, default=0.60,
                     help="fraction of the ceiling given to the 4-bit arena; "
-                         "measured access mix is 32.6%% hot")
+                         "0.60 is tuned for single-stream at a 9 GB ceiling")
+    ap.add_argument("--os-cache", action="store_true",
+                    help="also let macOS cache expert files; may speed repeated "
+                         "interactive reads but uses reclaimable system RAM")
+    ap.add_argument(
+        "--cache-policy",
+        choices=("lru", "slru-cold", "slru-all"),
+        default="slru-cold",
+        help="expert eviction policy. slru-cold (default) reserves half the "
+             "2-bit tier for repeat entries; slru-all also protects 4-bit "
+             "entries and is useful under tighter ceilings",
+    )
     ap.add_argument("--measure-draft", type=int, default=0,
                     help="acceptance rate of the resident cache as a draft model")
+    ap.add_argument("--prefetch", action="store_true",
+                    help="issue layer L+1's predicted experts during layer L "
+                         "(arena only); raises queue depth, costs mispredicted "
+                         "reads")
+    ap.add_argument("--prefetch-k", type=int, default=5,
+                    help="prefetch only the N highest-gate predicted experts "
+                         "(default: 5, tuned at a 9 GB ceiling; 0 means all)")
+    ap.add_argument("--prefetch-depth", type=int, default=1, choices=(1, 2),
+                    help="layers of lookahead. 2 also issues L+2, whose router "
+                         "is 72.5%% accurate on layer L's input (78.5%% at L+1)")
+    ap.add_argument("--prefetch-k2", type=int, default=4,
+                    help="candidates for the L+2 pass, when --prefetch-depth 2")
     ap.add_argument("--profile", action="store_true",
                     help="attribute time inside the MoE block; forces an\n                          eval at each boundary, so the run is slower")
     a = ap.parse_args()
 
-    # ponytail: ceiling + core + slack, not a magic 14 -- the old constant did
-    # not move with --ceiling-gb, so it blocked runs that fit and would have
-    # waved through a ceiling that did not.
-    need = a.ceiling_gb + 6
+    snap = Path(a.snap)
+    raw_cfg = json.loads((snap / "config.json").read_text())
+    if a.batch > 1:
+        # The batch loop knows its maximum cache capacity, unlike an open-ended
+        # interactive prompt, so account for each material resident explicitly.
+        need = wide_batch_memory_gb(
+            raw_cfg,
+            a.ceiling_gb,
+            a.batch,
+            a.prompt_len + a.tokens,
+        )
+    else:
+        # Preserve the established conservative guard for arbitrary prompts.
+        need = a.ceiling_gb + 6
     avail = psutil.virtual_memory().available / 1e9
     assert avail > need, (f"only {avail:.1f} GB free, need {need:.1f} for a "
                           f"{a.ceiling_gb:.1f} GB ceiling; close things or "
                           f"lower --ceiling-gb")
 
-    snap = Path(a.snap)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(str(snap))
     t0 = time.perf_counter()
@@ -298,8 +386,23 @@ def main():
                                              trace=bool(a.trace_out),
                                              threads=a.threads,
                                              arena=a.arena,
-                                             hot_share=a.hot_share)
+                                             hot_share=a.hot_share,
+                                             nocache=not a.os_cache,
+                                             cache_policy=a.cache_policy)
     print(f"dense core resident: {core:.2f} GB  (loaded in {time.perf_counter()-t0:.0f}s)")
+
+    blocks = [l.block_sparse_moe.__dict__["_stream"]
+              for l in model.model.layers] if a.arena else []
+    if a.prefetch:
+        assert a.arena, "--prefetch needs --arena"
+        for cur, nxt in zip(blocks, blocks[1:]):
+            cur.nxt = nxt
+            cur.prefetch_k = a.prefetch_k or None
+        if a.prefetch_depth == 2:
+            for cur, nxt2 in zip(blocks, blocks[2:]):
+                cur.nxt2 = nxt2
+                cur.prefetch_k2 = a.prefetch_k2 or None
+        print("prefetch router: original quantized GPU path")
 
     if a.measure_draft:
         acc, td, tt, pairs = measure_draft(model, store, tok, a.prompt,
@@ -359,6 +462,11 @@ def main():
           f"peak {mx.get_peak_memory()/1e9:.2f} GB")
     # t_pread is thread-seconds now that reads overlap compute; t_stall is
     # the part that could not be hidden and is the only one that is runtime.
+    if s.get("prefetched"):
+        pf = s["prefetched"]
+        print(f"  prefetch: {pf} experts issued a layer early, "
+              f"{s['prefetch_used']} used ({s['prefetch_used']/pf*100:.1f}%), "
+              f"{s['prefetch_wasted']} evicted unused")
     acc = s['t_stall'] + s['t_convert'] + s['t_eval']
     print(f"  where the time went: blocked on disk {s['t_stall']:.1f}s  "
           f"numpy->mx {s['t_convert']:.1f}s  eval {s['t_eval']:.1f}s  "

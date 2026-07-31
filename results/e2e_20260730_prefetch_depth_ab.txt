@@ -1,0 +1,21 @@
+===== warmup : --prefetch-depth 1 =====
+  hit 58.9%  read 11.39 GB
+decode 32 tokens in 14.1s (2.27 tok/s)
+  hit 75.3%  read 42.25 GB (1.32 GB/token)
+  evictions 8700  peak 9.00 GB  rss 9.24 GB
+  prefetch: 5476 experts issued a layer early, 4954 used (90.5%), 472 evicted unused
+  where the time went: blocked on disk 10.7s  numpy->mx 0.0s  eval 0.0s  = 10.7s of 18.0s (59%)
+===== d1 : --prefetch-depth 1 =====
+  hit 58.9%  read 11.39 GB
+decode 32 tokens in 13.7s (2.34 tok/s)
+  hit 75.3%  read 42.25 GB (1.32 GB/token)
+  evictions 8700  peak 9.00 GB  rss 9.32 GB
+  prefetch: 5476 experts issued a layer early, 4954 used (90.5%), 472 evicted unused
+  where the time went: blocked on disk 10.8s  numpy->mx 0.0s  eval 0.0s  = 10.8s of 17.3s (62%)
+===== d2 : --prefetch-depth 2 --prefetch-k2 4 =====
+  hit 61.7%  read 11.72 GB
+decode 32 tokens in 14.4s (2.22 tok/s)
+  hit 76.7%  read 44.13 GB (1.38 GB/token)
+  evictions 9142  peak 9.00 GB  rss 9.21 GB
+  prefetch: 6191 experts issued a layer early, 5358 used (86.5%), 754 evicted unused
+  where the time went: blocked on disk 10.4s  numpy->mx 0.0s  eval 0.0s  = 10.4s of 18.1s (57%)

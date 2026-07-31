@@ -57,15 +57,36 @@ MXD = {"U32": mx.uint32, "I32": mx.int32, "F16": mx.float16,
 
 class ArenaStore:
     def __init__(self, index_path, ceiling_gb=8.0, hot_share=0.33, threads=8,
-                 nocache=True):
+                 nocache=True, cache_policy="lru"):
         idx = json.loads(Path(index_path).read_text())
+        if cache_policy not in ("lru", "slru-cold", "slru-all"):
+            raise ValueError(
+                "cache_policy must be 'lru', 'slru-cold', or 'slru-all'"
+            )
         self.meta = idx["experts"]
         self.layers, self.E = idx["layers"], idx["num_experts"]
         self.top_k = idx["top_k"]
+        self.cache_policy = cache_policy
+        self.ceiling = int(ceiling_gb * 1e9)
+        # Large expert-major reads leave enough useful work per tier to overlap
+        # I/O and gather.  The original nine-read layout regresses under the same
+        # scheduling because its many writes contend with the GPU for memory.
+        self.tier_overlap = bool(idx.get("pack"))
         self.fds, self._nocache = {}, nocache
         self.pool = ThreadPoolExecutor(max_workers=threads)
         self.hits = self.misses = self.evictions = self.bytes_read = 0
         self.t_stall = 0.0
+        # Cross-layer prefetch needs two guards that a purely synchronous store
+        # does not. `pinned` holds the slots the CURRENT layer routed to: its
+        # gather is still an unevaluated graph when the prefetch for L+1 claims
+        # slots, so _claim must not hand one of them away. `inflight` maps a
+        # resident key to the reads still filling it, because a prefetched
+        # expert is in the LRU -- and therefore a hit -- before its bytes land,
+        # and the gather must wait for them anyway.
+        self.pinned = {}
+        self.inflight = {}
+        self.pf_keys = set()
+        self.prefetched = self.prefetch_used = self.prefetch_wasted = 0
 
         # A sample expert per tier fixes the arena shapes. Every expert of a
         # tier has identical shapes -- that is what makes a stacked arena
@@ -78,20 +99,44 @@ class ArenaStore:
             if len(sample) == 2:
                 break
         self.tiers = sorted(sample)
-
         self.arena, self.mv, self.item = {}, {}, {}
-        self.slots, self.lru, self.free = {}, {}, {}
-        share = {"hot": hot_share, "cold": 1.0 - hot_share}
+        self.slots, self.lru, self.protected, self.protected_cap = {}, {}, {}, {}
+        self.free = {}
+        share = (
+            {self.tiers[0]: 1.0}
+            if len(self.tiers) == 1
+            else {"hot": hot_share, "cold": 1.0 - hot_share}
+        )
         for t in self.tiers:
             m = sample[t]
             per = sum(m[p][k][3] for p in PROJS for k in ARRS)
             self.item[t] = per
-            # +1 for the reserved zero slot at index 0: a masked-out entry in a
-            # mixed-tier call gathers from it and contributes exactly 0.0, which
-            # is what keeps the all-hot case bit-identical.
-            n = max(2, int(ceiling_gb * 1e9 * share.get(t, 0.5) / per)) + 1
+            # Slot 0 is reserved: a masked-out mixed-tier entry gathers from it
+            # and contributes exactly 0.0. It is part of the requested ceiling,
+            # not an allocation hidden just beyond it.
+            n = int(self.ceiling * share.get(t, 0.5) / per)
+            if n < 2:
+                raise ValueError(
+                    f"{ceiling_gb:.2f} GB gives tier {t} no usable expert "
+                    f"slot after its reserved zero slot; raise --ceiling-gb "
+                    f"or adjust --hot-share"
+                )
             self.slots[t] = n
             self.lru[t] = OrderedDict()
+            self.protected[t] = OrderedDict()
+            # SLRU reserves half the usable slots for entries that have been
+            # requested at least twice. New demand and speculative prefetches
+            # compete in probation first, so a one-pass scan cannot evict the
+            # recurring half of the working set. Plain LRU gives protection no
+            # reserved capacity and therefore follows the original path.
+            self.protected_cap[t] = (
+                (n - 1) // 2
+                if (
+                    self.cache_policy == "slru-all"
+                    or self.cache_policy == "slru-cold" and t == "cold"
+                )
+                else 0
+            )
             self.free[t] = list(range(1, n))
             for p in PROJS:
                 for k in ARRS:
@@ -105,6 +150,10 @@ class ArenaStore:
                     self.arena[(t, p, k)] = a
                     self.mv[(t, p, k)] = memoryview(a).cast("B")
         self.resident = sum(self.slots[t] * self.item[t] for t in self.tiers)
+        assert self.resident <= self.ceiling, (
+            f"arena allocated {self.resident} bytes against "
+            f"{self.ceiling}-byte ceiling"
+        )
 
     def _fd(self, root, shard):
         key = (root, shard)
@@ -125,25 +174,109 @@ class ArenaStore:
         if got != nbytes:
             raise IOError(f"short read {got}/{nbytes} at {shard}+{off}")
 
+    def _read_many(self, recs, dsts):
+        """DMA one contiguous expert into its nine discontiguous arena arrays."""
+        root, shard, off, _, _, _ = recs[0]
+        end = off
+        for rec, dst in zip(recs, dsts):
+            rroot, rshard, roff, nbytes, _, _ = rec
+            if (rroot, rshard, roff) != (root, shard, end):
+                raise ValueError("expert pack records are not contiguous")
+            if len(dst) != nbytes:
+                raise ValueError(f"arena slice is {len(dst)} bytes, need {nbytes}")
+            end += nbytes
+        want = end - off
+        got = os.preadv(self._fd(root, shard), dsts, off)
+        if got != want:
+            raise IOError(f"short packed read {got}/{want} at {shard}+{off}")
+
+    @staticmethod
+    def _contiguous(recs):
+        root, shard, end, _, _, _ = recs[0]
+        for rec in recs:
+            rroot, rshard, off, nbytes, _, _ = rec
+            if (rroot, rshard, off) != (root, shard, end):
+                return False
+            end += nbytes
+        return True
+
     def _claim(self, t, key):
         """A slot for `key`, evicting the least recently used if none is free.
 
-        Safe to overwrite because the caller has already evaluated the previous
-        layer -- the router of layer L+1 consumes layer L's output, which forces
-        it, so no pending graph still references a slot by the time this runs.
+        The synchronous path was safe to overwrite because the caller had
+        already evaluated the previous layer -- the router of layer L+1 consumes
+        layer L's output, which forces it, so no pending graph referenced a slot
+        by the time this ran. Prefetch breaks that: it claims slots for L+1 while
+        layer L's gather is still an unevaluated graph. Hence `pinned`, which
+        holds exactly the slots the current layer routed to and is skipped when
+        choosing a victim.
+
+        Returns None when every slot of the tier is pinned, which only a
+        best-effort prefetch can ask for and which it treats as "skip this one".
         """
-        if self.free[t]:
+        pin = self.pinned.get(t, ())
+        probation_cap = self.slots[t] - 1 - self.protected_cap[t]
+        # Fixed-size probation is intentional. At startup SLRU may leave the
+        # protected half physically free until entries earn promotion; using
+        # those slots for one-hit scans would reduce SLRU back to plain LRU.
+        probation_full = len(self.lru[t]) >= probation_cap
+        victim = None
+        victim_segment = None
+        if probation_full or not self.free[t]:
+            victim = next(
+                (k for k, v in self.lru[t].items() if v not in pin),
+                None,
+            )
+            if victim is not None:
+                victim_segment = self.lru[t]
+        if victim is None and not probation_full and self.free[t]:
             s = self.free[t].pop()
         else:
-            _, s = self.lru[t].popitem(last=False)
+            if victim is None:
+                victim = next(
+                    (k for k, v in self.protected[t].items() if v not in pin),
+                    None,
+                )
+                if victim is not None:
+                    victim_segment = self.protected[t]
+            if victim is None:
+                return None
+            s = victim_segment.pop(victim)
+            self.inflight.pop(victim, None)
+            if victim in self.pf_keys:
+                # Prefetched, then evicted before its layer ever ran: bytes and
+                # a slot spent on a misprediction. The counter is the honest
+                # price of the 78.5% and has to be reported next to it.
+                self.pf_keys.discard(victim)
+                self.prefetch_wasted += 1
             self.evictions += 1
         self.lru[t][key] = s
         return s
 
+    def _slot(self, t, key):
+        """Return a resident slot from either SLRU segment."""
+        if key in self.protected[t]:
+            return self.protected[t][key]
+        return self.lru[t][key]
+
+    def _touch(self, t, key):
+        """Refresh an LRU hit or promote an SLRU probation hit."""
+        if key in self.protected[t]:
+            self.protected[t].move_to_end(key)
+            return
+        if self.protected_cap[t] == 0:
+            self.lru[t].move_to_end(key)
+            return
+        slot = self.lru[t].pop(key)
+        self.protected[t][key] = slot
+        if len(self.protected[t]) > self.protected_cap[t]:
+            old, old_slot = self.protected[t].popitem(last=False)
+            self.lru[t][old] = old_slot
+
     def slots_for(self, layer, experts):
         """{expert: (tier, slot)}, every one resident on return."""
-        placed, futs = self.submit(layer, experts)
-        self.wait(futs)
+        placed, by_tier = self.submit(layer, experts)
+        self.wait([f for futs in by_tier.values() for f in futs])
         return placed
 
     def wait(self, futs):
@@ -154,51 +287,86 @@ class ArenaStore:
             f.result()
         self.t_stall += time.perf_counter() - t0
 
-    def submit(self, layer, experts):
+    def submit(self, layer, experts, prefetch=False):
         """Claim slots now, return before the bytes arrive.
 
         Slots are claimed synchronously so a later submit cannot steal one an
         earlier submit is still filling; only the reads are deferred.
 
-        Nothing currently defers them. Splitting a layer's tokens into chunks
-        and staggering the waits was tried and removed: it does hide disk (105s
-        against 129s blocked at B=512) but the gathers get narrower and the
-        penalty is larger than the hiding. Kept split from `slots_for` because
-        the seam is where any future overlap has to go -- per tier rather than
-        per token, so the token dimension stays wide.
+        `prefetch=True` is the cross-layer path: layer L issues layer L+1's
+        predicted experts while its own gather still has to run. It is
+        best-effort in both directions -- it never evicts a slot the current
+        layer is using, and it never raises when the arena is full -- and it
+        does not touch hit/miss accounting, which must keep meaning "what the
+        real router asked for".
+
+        Splitting a layer's TOKENS into chunks and staggering the waits was
+        tried and removed: it does hide disk (105s against 129s blocked at
+        B=512) but the gathers get narrower and the penalty is larger than the
+        hiding. This defers across layers instead, where the gather stays full
+        width.
         """
         want = list(dict.fromkeys(experts))
         out, miss = {}, []
+        waits = {t: [] for t in self.tiers}
         for e in want:
             key = (layer, e)
             t = self.tier(layer, e)
-            if key in self.lru[t]:
-                self.hits += 1
-                self.lru[t].move_to_end(key)
-                out[e] = (t, self.lru[t][key])
+            if key in self.lru[t] or key in self.protected[t]:
+                out[e] = (t, self._slot(t, key))
+                if not prefetch:
+                    self.hits += 1
+                    self._touch(t, key)
+                    if key in self.pf_keys:
+                        self.pf_keys.discard(key)
+                        self.prefetch_used += 1
+                # A prefetched expert enters the LRU when its slot is claimed,
+                # not when its bytes land. Resident is not the same as ready.
+                futs = self.inflight.get(key)
+                if futs:
+                    if all(f.done() for f in futs):
+                        del self.inflight[key]
+                    elif not prefetch:
+                        waits[t].extend(futs)
             else:
-                self.misses += 1
+                if not prefetch:
+                    self.misses += 1
                 miss.append((e, t))
 
-        need = {}
-        for _, t in miss:
-            need[t] = need.get(t, 0) + 1
-        for t, n in need.items():
-            if n > self.slots[t] - 1:
-                raise ValueError(
-                    f"layer {layer} needs {n} {t} experts but the arena has "
-                    f"{self.slots[t]-1}; raise --ceiling-gb or --hot-share")
+        if not prefetch:
+            need = {}
+            for _, t in miss:
+                need[t] = need.get(t, 0) + 1
+            for t, n in need.items():
+                if n > self.slots[t] - 1:
+                    raise ValueError(
+                        f"layer {layer} needs {n} {t} experts but the arena has "
+                        f"{self.slots[t]-1}; raise --ceiling-gb or --hot-share")
 
-        jobs = []
+        jobs = {t: [] for t in self.tiers}
+        issued = []
         for e, t in miss:
             s = self._claim(t, (layer, e))
+            if s is None:            # every slot of the tier is pinned
+                continue
             out[e] = (t, s)
+            issued.append((e, t, s))
             m = self.meta[f"L{layer}.E{e}"]
+            recs, dsts = [], []
             for p in PROJS:
                 for k in ARRS:
                     rec = m[p][k]
                     nb = rec[3]
-                    jobs.append((rec, self.mv[(t, p, k)][s * nb:(s + 1) * nb]))
+                    recs.append(rec)
+                    dsts.append(self.mv[(t, p, k)][s * nb:(s + 1) * nb])
+            key = (layer, e)
+            if self._contiguous(recs):
+                jobs[t].append((key, self._read_many, (recs, dsts)))
+            else:
+                jobs[t].extend(
+                    (key, self._read_into, (rec, dst))
+                    for rec, dst in zip(recs, dsts)
+                )
             self.bytes_read += self.item[t]
 
         # Issue order is deliberately NOT sorted by disk offset. That was tried
@@ -206,8 +374,31 @@ class ArenaStore:
         # ascending order looked free -- and measured 1.95 tok/s against 2.07
         # unsorted. With eight reads already in flight the drive does its own
         # scheduling and the sort only costs.
-        futs = [self.pool.submit(self._read_into, *j) for j in jobs]
-        return out, futs
+        # Queue a whole tier before the next.  ArenaMoE waits/evaluates in this
+        # same order, so once the first tier is ready its full-width gather can
+        # occupy the GPU while the pool fills the other tier's disjoint arrays.
+        by_tier = {}
+        for t in self.tiers:
+            futs = []
+            for key, fn, args in jobs[t]:
+                f = self.pool.submit(fn, *args)
+                self.inflight.setdefault(key, []).append(f)
+                futs.append(f)
+            # Reads a prefetch issued are already in flight; the real submit
+            # still has to wait for them, so they join this layer's futures.
+            by_tier[t] = futs + waits[t]
+
+        if prefetch:
+            self.prefetched += len(issued)
+            self.pf_keys.update((layer, e) for e, _, _ in issued)
+        else:
+            # Pin what this layer routed to. The prefetch that runs next claims
+            # slots while the gather below is still an unevaluated graph.
+            pin = {t: set() for t in self.tiers}
+            for t, s in out.values():
+                pin[t].add(s)
+            self.pinned = pin
+        return out, by_tier
 
     def stats(self):
         n = self.hits + self.misses
@@ -216,7 +407,14 @@ class ArenaStore:
                 "evictions": self.evictions, "bytes_read": self.bytes_read,
                 "resident": self.resident, "peak": self.resident,
                 "slots": {t: self.slots[t] for t in self.tiers},
-                "t_stall": self.t_stall, "t_convert": 0.0, "t_eval": 0.0}
+                "t_stall": self.t_stall, "t_convert": 0.0, "t_eval": 0.0,
+                "prefetched": self.prefetched,
+                "prefetch_used": self.prefetch_used,
+                "prefetch_wasted": self.prefetch_wasted,
+                "cache_policy": self.cache_policy,
+                "protected": {
+                    t: len(self.protected[t]) for t in self.tiers
+                }}
 
     def close(self):
         self.pool.shutdown()
@@ -243,6 +441,44 @@ class ArenaMoE:
     def __init__(self, store: ArenaStore, layer: int, gate, bias, top_k: int):
         self.store, self.layer, self.gate = store, layer, gate
         self.bias, self.top_k = bias, top_k
+        # Set by the engine to the NEXT layer's block when cross-layer prefetch
+        # is on. Left None otherwise, which restores the synchronous path
+        # exactly -- no prefetch submit, no pinning, nothing to wait on.
+        self.nxt = None
+        # And to the layer after that, when depth-2 lookahead is on. The router
+        # at L+2 is 72.5% accurate on layer L's MoE input against 78.5% at L+1
+        # (`crosslayer_probe.py --distances 1,2,3`; L+3 is 68.0%), so the decay
+        # with distance is gentle and all three sit far above the 33.0% that
+        # killed the same-layer next-token prefetch. The reason to want it is
+        # queue depth: `depth_bw.py` measures 3.96 GB/s at the depth the
+        # algorithm allows and 5.91 at depth 16.
+        #
+        # MEASURED, AND IT LOSES IN PYTHON -- default off. At the 9 GB / k=5
+        # operating point, depth 2 with k2=4 does everything it was built to do:
+        # hit 75.3% -> 76.7%, blocked on disk 10.8s -> 10.4s. And it still runs
+        # 2.22 tok/s against 2.34, because the time OFF the disk grows 6.5s ->
+        # 7.7s. That is 1984 extra `route` calls (62 layers x 32 tokens) at
+        # ~0.6 ms each: a router matmul, an argpartition, an argsort, and a
+        # `.tolist()` that forces a GPU sync. It pays 0.6 ms per layer of
+        # interpreter to save 0.2 ms of disk.
+        #
+        # Same shape as the prefetch_k=8 result below, different currency --
+        # bytes there, host overhead here. Keep it: in a native runtime the
+        # router pass is nearly free and the sync disappears, so the 0.4s of
+        # disk it removes would come without the 1.2s that currently buys it.
+        # This lever is not dead, it is downstream of the rewrite.
+        self.nxt2 = None
+        # How many of the next layer's predicted experts to issue. The full
+        # top-8 measured 79.3% useful and read 28% more bytes than the
+        # synchronous path -- the misses it removes are worth less than the
+        # mispredictions cost, and it only wins because wasted bytes sit off the
+        # critical path. Issuing fewer, higher-gate candidates trades coverage
+        # for waste at a better rate.
+        self.prefetch_k = None
+        # Depth-2 defaults to one fewer candidate than depth-1. Its predictions
+        # are 6 points worse and its bytes are the most speculative in flight,
+        # so it should be the first thing to give up a slot.
+        self.prefetch_k2 = None
 
     def route(self, x):
         scores = mx.sigmoid(self.gate(x.astype(mx.float32)))
@@ -257,12 +493,46 @@ class ArenaMoE:
         T = flat.shape[0]
         inds, gates = self.route(x)
         ii = inds.reshape(-1, self.top_k).tolist()
-        placed = self.store.slots_for(self.layer, [e for row in ii for e in row])
+        experts = [e for row in ii for e in row]
+        if self.store.tier_overlap:
+            placed, reads = self.store.submit(self.layer, experts)
+        else:
+            placed, reads = self.store.slots_for(self.layer, experts), None
+
+        # Cross-layer prefetch. The next layer's router is 78.5% accurate on
+        # THIS layer's MoE input (`crosslayer_probe.py`), against 33.0% for the
+        # previous token's selection at the same layer -- the prefetch NOTES
+        # records as failed. Issued after this layer's own reads so those own
+        # the queue first, and before the gather below, which is the window the
+        # reads get to land in.
+        # Issued nearest-first: L+1 before L+2, so the reads most likely to be
+        # needed soonest own the queue ahead of the more speculative ones. A
+        # slot claimed here goes to the fresh end of the LRU, so the L+2 pass
+        # cannot evict what the L+1 pass just claimed.
+        for blk, k in ((self.nxt, self.prefetch_k),
+                       (self.nxt2, self.prefetch_k2)):
+            if blk is None:
+                continue
+            pi, pg = blk.route(x)
+            pi = pi.reshape(-1, self.top_k)
+            if k and k < self.top_k:
+                # route() returns the top-k unordered (argpartition), so the
+                # highest-gate candidates have to be selected explicitly.
+                order = mx.argsort(-pg.reshape(-1, self.top_k), axis=-1)
+                pi = mx.take_along_axis(pi, order[:, :k], axis=-1)
+            self.store.submit(
+                blk.layer,
+                [e for row in pi.tolist() for e in row],
+                prefetch=True,
+            )
+
         sc = gates.reshape(T, self.top_k).astype(x.dtype)
-        out = self._apply(flat, ii, placed, sc, shape[-1], x.dtype)
+        out = self._apply(
+            flat, ii, placed, sc, shape[-1], x.dtype, reads=reads
+        )
         return out.reshape(shape).astype(x.dtype)
 
-    def _apply(self, flat, ii, placed, sc, d, dtype):
+    def _apply(self, flat, ii, placed, sc, d, dtype, reads=None):
         """The gather itself, for one contiguous run of tokens.
 
         `sc` is already cast to x.dtype: mlx_lm casts the normalised scores
@@ -287,6 +557,8 @@ class ArenaMoE:
             # reduction is mlx_lm's own. This is the path `verify` exercises,
             # and the reason bit-identity survives at all.
             t = present[0]
+            if reads is not None:
+                self.store.wait(reads[t])
             y = self._gather(t, mx.expand_dims(flat, (-2, -3)),
                              mx.array(slot[t])).squeeze(-2)      # [T, k, d]
             return (y * sc[..., None]).sum(axis=-2)
@@ -301,23 +573,50 @@ class ArenaMoE:
         # one reduction; this scatter-adds them, and eight sequential roundings
         # in bfloat16 cost 1.4e-3 relative -- bfloat16 working as specified, but
         # there is no reason to pay it when the accumulator can be wider.
-        out = mx.zeros((T, d), dtype=mx.float32)
         gflat = sc.reshape(-1).astype(mx.float32)
-        for t in present:
+        parts = []
+        for i, t in enumerate(present):
+            if reads is not None:
+                self.store.wait(reads[t])
             ent = np.argwhere(mask[t] > 0)                       # [n, 2]
-            rows = mx.array(ent[:, 0])
-            idx = mx.array(slot[t][ent[:, 0], ent[:, 1]])[:, None]
+            rhs = slot[t][ent[:, 0], ent[:, 1]]
+
+            # Keep equal experts adjacent while gather_qmm runs.  At a wide
+            # batch the same expert serves many rows; token-major order scatters
+            # those uses across the grid and repeatedly pushes its weights
+            # through the GPU caches.  Stable slot order measured 1.35x faster
+            # at B=512 on M4.  Undo it before the scatter so route/reduction
+            # order, and therefore the arithmetic contract, stays unchanged.
+            order = np.argsort(rhs, kind="stable")
+            sent = ent[order]
+            rows = mx.array(sent[:, 0])
+            idx = mx.array(rhs[order])[:, None]
             xin = mx.expand_dims(flat[rows], (-2, -3))           # [n, 1, 1, d]
             y = self._gather(t, xin, idx).reshape(len(ent), d)
+
+            undo = np.empty_like(order)
+            undo[order] = np.arange(len(order))
+            y = y[mx.array(undo)]
+            rows = mx.array(ent[:, 0])
             g = gflat[mx.array(ent[:, 0] * self.top_k + ent[:, 1])]
-            out = out.at[rows].add(y.astype(mx.float32) * g[:, None])
+            val = y.astype(mx.float32) * g[:, None]
+            parts.append((rows, val))
+            if reads is not None and i + 1 < len(present):
+                mx.async_eval(val)
+
+        # Reads may have overlapped the independent tier gathers, but reduction
+        # remains in the same tier and route order as the serial implementation.
+        out = mx.zeros((T, d), dtype=mx.float32)
+        for rows, val in parts:
+            out = out.at[rows].add(val)
         return out.astype(dtype)
 
     def _gather(self, t, xin, idx):
         A = lambda p, k: self.store.arena[(t, p, k)]
         qm = lambda v, p: mx.gather_qmm(
             v, A(p, "weight"), A(p, "scales"), A(p, "biases"),
-            rhs_indices=idx, transpose=True, group_size=GROUP, bits=BITS[t])
+            rhs_indices=idx, transpose=True,
+            group_size=GROUP, bits=BITS[t])
         h = SWIGLU(qm(xin, "up_proj"), qm(xin, "gate_proj"))
         return qm(h, "down_proj")
 

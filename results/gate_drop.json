@@ -1,50 +1,50 @@
 {
   "8": {
-    "err_drop_smallest": 5.382764101113935e-08,
-    "err_cache_aware": 5.382764101113935e-08,
-    "miss_per_token_oracle": 4.15625,
-    "miss_per_token_cache": 4.15625
+    "err_drop_smallest": 5.87771147309013e-08,
+    "err_cache_aware": 5.87771147309013e-08,
+    "miss_per_token_oracle": 4.6015625,
+    "miss_per_token_cache": 4.6015625
   },
   "7": {
-    "err_drop_smallest": 0.11438170075416565,
-    "err_cache_aware": 0.09565321356058121,
-    "miss_per_token_oracle": 3.5625,
-    "miss_per_token_cache": 3.15625
+    "err_drop_smallest": 0.13982562720775604,
+    "err_cache_aware": 0.1516280472278595,
+    "miss_per_token_oracle": 4.0,
+    "miss_per_token_cache": 3.6015625
   },
   "6": {
-    "err_drop_smallest": 0.22847138345241547,
-    "err_cache_aware": 0.22807347774505615,
-    "miss_per_token_oracle": 3.09375,
-    "miss_per_token_cache": 2.15625
+    "err_drop_smallest": 0.2584998905658722,
+    "err_cache_aware": 0.3104252219200134,
+    "miss_per_token_oracle": 3.4609375,
+    "miss_per_token_cache": 2.609375
   },
   "5": {
-    "err_drop_smallest": 0.3933045566082001,
-    "err_cache_aware": 0.4325051009654999,
-    "miss_per_token_oracle": 2.5625,
-    "miss_per_token_cache": 1.21875
+    "err_drop_smallest": 0.40590670704841614,
+    "err_cache_aware": 0.4659275412559509,
+    "miss_per_token_oracle": 2.828125,
+    "miss_per_token_cache": 1.6640625
   },
   "4": {
-    "err_drop_smallest": 0.6531734466552734,
-    "err_cache_aware": 0.5465795397758484,
-    "miss_per_token_oracle": 1.90625,
-    "miss_per_token_cache": 0.46875
+    "err_drop_smallest": 0.6052637100219727,
+    "err_cache_aware": 0.6751526594161987,
+    "miss_per_token_oracle": 2.21875,
+    "miss_per_token_cache": 0.8515625
   },
   "3": {
-    "err_drop_smallest": 1.0834742784500122,
-    "err_cache_aware": 0.5982526540756226,
-    "miss_per_token_oracle": 1.4375,
-    "miss_per_token_cache": 0.15625
+    "err_drop_smallest": 0.8970687985420227,
+    "err_cache_aware": 0.8330888152122498,
+    "miss_per_token_oracle": 1.703125,
+    "miss_per_token_cache": 0.3515625
   },
   "2": {
-    "err_drop_smallest": 1.7949260473251343,
-    "err_cache_aware": 0.6207579374313354,
-    "miss_per_token_oracle": 0.96875,
-    "miss_per_token_cache": 0.0
+    "err_drop_smallest": 1.3677843809127808,
+    "err_cache_aware": 0.9477453231811523,
+    "miss_per_token_oracle": 1.140625,
+    "miss_per_token_cache": 0.0859375
   },
   "1": {
-    "err_drop_smallest": 3.705965280532837,
-    "err_cache_aware": 0.6207579374313354,
-    "miss_per_token_oracle": 0.46875,
-    "miss_per_token_cache": 0.0
+    "err_drop_smallest": 2.403238534927368,
+    "err_cache_aware": 1.0460278987884521,
+    "miss_per_token_oracle": 0.5703125,
+    "miss_per_token_cache": 0.015625
   }
 }
