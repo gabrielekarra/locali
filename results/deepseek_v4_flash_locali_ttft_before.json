@@ -1,0 +1,16 @@
+{
+  "backend": "locali",
+  "prompt": "Ciao, rispondi con una sola parola.",
+  "load_s": 3.406035416999657,
+  "render_s": 0.0009092500004044268,
+  "prefill_done_s": 6.562708749999729,
+  "first_raw_token_s": 6.599797582999599,
+  "turn_s": 8.85615987500205,
+  "prompt_tokens": 21,
+  "generated_tokens": 3,
+  "prefill_s": 6.56109020799704,
+  "decode_s": 2.2563577920009266,
+  "visible_text": "",
+  "dense_gb": 6.486361656,
+  "arena_gb": 6.992953344
+}

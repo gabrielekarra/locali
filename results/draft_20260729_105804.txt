@@ -1,6 +1,0 @@
-dense core resident: 2.28 GB  (loaded in 1s)
-
-cache-as-draft over 24 steps
-  acceptance 16.7%   draft 189 ms/token  true 1053 ms/token   (5.6x)
-  hit 42.9%  peak 5.00 GB
-  accepted: [' French', ' is', ' ', ' million']

@@ -1,0 +1,50 @@
+{
+  "backend": "locali-dspark",
+  "prompt_tokens": 16,
+  "tokens": 16,
+  "ceiling_gb": 10.0,
+  "dense_gb": 7.066377732000001,
+  "arena_gb": 9.9876864,
+  "slots": {
+    "cold": 1271,
+    "hot": 97
+  },
+  "prefill_seconds": 9.056591999997181,
+  "prefill_tok_s": 1.7666689633368688,
+  "decode_seconds": 11.479517792002298,
+  "decode_tok_s": 1.393786767868167,
+  "steady_tok_s": 1.4637251223757786,
+  "first_token_seconds": 1.2316920420053066,
+  "hit_rate": 0.5702080237741456,
+  "bytes_read": 16516644864,
+  "mlx_active_gb": 17.05421438,
+  "scheduler": "python",
+  "cache_policy": "slru-all",
+  "mtp_depth": 5,
+  "mtp_share": 0.1,
+  "mtp": {
+    "cycles": 11,
+    "accepted": 4,
+    "drafted": 10,
+    "accept_rate": 0.4,
+    "depth_drafted": [
+      8,
+      2,
+      0,
+      0,
+      0
+    ],
+    "depth_accepted": [
+      4,
+      0,
+      0,
+      0,
+      0
+    ],
+    "backbone_seconds": 9.93482112500351,
+    "draft_seconds": 0.2924666260078084,
+    "sample_seconds": 0.0008267919911304489,
+    "cache_seconds": 0.007357125999988057,
+    "finish_reason": "length"
+  }
+}

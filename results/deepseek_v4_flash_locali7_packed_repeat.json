@@ -1,0 +1,21 @@
+{
+  "backend": "locali",
+  "prompt_tokens": 64,
+  "tokens": 128,
+  "ceiling_gb": 7.0,
+  "dense_gb": 6.486361656,
+  "arena_gb": 6.992953344,
+  "slots": {
+    "cold": 988
+  },
+  "prefill_seconds": 10.44594750000033,
+  "prefill_tok_s": 6.126777872471404,
+  "decode_seconds": 49.68919833399923,
+  "decode_tok_s": 2.576012580030247,
+  "steady_tok_s": 2.594726222821701,
+  "first_token_seconds": 0.743350750002719,
+  "hit_rate": 0.7139958817829457,
+  "bytes_read": 66850652160,
+  "mlx_active_gb": 13.502397064,
+  "os_cache": false
+}

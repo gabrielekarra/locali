@@ -1,4 +1,4 @@
-"""Repack indexed MiniMax-M2.5 experts for one aligned read per expert.
+"""Repack indexed DeepSeek V4 experts for one aligned read per expert.
 
 Safetensors is tensor-major: an expert's nine arrays are separate, unaligned
 regions, so the streaming engine issues nine small reads.  This optional,
@@ -243,7 +243,7 @@ def verify(source_index, packed_index, sample_experts=16):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--index", default="models/m25.idx")
+    ap.add_argument("--index", default="models/dsv4-2.4bit.idx")
     ap.add_argument("--data")
     ap.add_argument("--out-index")
     ap.add_argument(

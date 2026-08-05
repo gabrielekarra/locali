@@ -1,4 +1,8 @@
 models
+.runtime/
+native/liblocali_core.dylib
+native/liblocali_core.so
+native/test_locali_core
 .venv/
 __pycache__/
 .pytest_cache/

@@ -1,0 +1,31 @@
+{
+  "backend": "locali",
+  "prompt_tokens": 64,
+  "tokens": 32,
+  "ceiling_gb": 7.0,
+  "dense_gb": 6.486361656,
+  "arena_gb": 6.992953344,
+  "slots": {
+    "cold": 988
+  },
+  "prefill_seconds": 10.75833395799782,
+  "prefill_tok_s": 5.948876494247695,
+  "decode_seconds": 12.56909220900343,
+  "decode_tok_s": 2.5459276985077666,
+  "steady_tok_s": 2.7359282391076127,
+  "first_token_seconds": 1.2382357919996139,
+  "hit_rate": 0.6712693798449613,
+  "bytes_read": 19209388032,
+  "prefill_io_stall_seconds": 7.863883916012128,
+  "decode_io_stall_seconds": 6.080261034952855,
+  "decode_non_io_seconds": 6.488831174050574,
+  "mlx_active_gb": 13.50063372,
+  "os_cache": true,
+  "prefetch_depth": 0,
+  "prefetch_k": 5,
+  "prefetch_k2": 4,
+  "scheduler": "c",
+  "cache_policy": "lfu-decay",
+  "moe_kernel": "stock",
+  "hit_io_overlap": false
+}

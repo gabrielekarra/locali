@@ -1,0 +1,19 @@
+{
+  "backend": "locali",
+  "prompt": "Ciao, rispondi con una sola parola.",
+  "load_s": 3.0641503330007254,
+  "render_s": 4.1536574169986125,
+  "prime_s": 4.1530468329983705,
+  "prefill_done_s": 4.179756333000114,
+  "first_raw_token_s": 4.233256916002574,
+  "first_visible_text_s": 4.2332927500028745,
+  "turn_s": 6.707218666000699,
+  "prompt_tokens": 14,
+  "generated_tokens": 3,
+  "prefill_s": 4.179292749999149,
+  "decode_s": 2.4739335000012943,
+  "visible_text": "Ciao!",
+  "decoded_text": "Ciao!",
+  "dense_gb": 6.486361656,
+  "arena_gb": 6.992953344
+}

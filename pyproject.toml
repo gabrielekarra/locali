@@ -1,7 +1,7 @@
 [project]
 name = "locali"
 version = "0.1.0"
-description = "Run a MoE model whose expert weights do not fit in RAM: experts stream from disk under a hard byte ceiling."
+description = "Run DeepSeek V4 Flash locally by streaming routed experts from SSD under a hard memory ceiling."
 requires-python = "==3.12.*"
 dependencies = [
     "mlx",
