@@ -127,7 +127,7 @@ Run the test suite with:
 pytest -q
 ```
 
-The repository cleanup baseline is `19 passed`; the native C target also builds
+The repository cleanup baseline is `20 passed`; the native C target also builds
 with `-Werror` and reports `locali_core: all tests passed`.
 
 Detailed measurements are recorded in
