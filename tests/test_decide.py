@@ -355,3 +355,67 @@ def test_primed_state_advance_precedes_every_question_suffix():
     # each question's step is state, once, plus only its own suffix.
     assert engine.step_calls[1] == list(primed) + state_ids + suffix1
     assert engine.step_calls[2] == list(primed) + state_ids + suffix2
+
+
+class ChatFramedEngine(FakeEngine):
+    """A FakeEngine that advertises a chat template, like an instruct model.
+
+    Instruct-tuned checkpoints are trained to see their own template, and a
+    bare completion prompt measurably costs both accuracy and schema mass
+    (see decide._chat_frame). These tests pin the framing into the prompt the
+    decision layer actually builds.
+    """
+
+    HEAD = "<|s|>system\n{system}<|e|><|s|>user\n"
+    TAIL = "<|e|><|s|>assistant\n"
+
+    def chat_frame(self, system):
+        return self.HEAD.format(system=system), self.TAIL
+
+
+def _squash(text: str) -> str:
+    """FakeEngine's whitespace tokenizer does not round-trip spacing, so the
+    chat-framing tests compare structure rather than exact layout."""
+    return "".join(text.split())
+
+
+_CHOICE = Choice(
+    name="dept",
+    question="Which department?",
+    options=("billing", "technical", "sales"),
+)
+
+
+def test_prime_renders_the_system_turn_exactly_once():
+    engine = ChatFramedEngine(_queued(_peaked_logits(4096, high_index=0)))
+    cache = prime(engine, "ROUTE TICKETS")
+    rendered = _squash(engine.decode_text(cache))
+    assert rendered == _squash(ChatFramedEngine.HEAD.format(system="ROUTE TICKETS"))
+    assert rendered.count(_squash("ROUTE TICKETS")) == 1
+
+
+def test_question_suffix_is_closed_by_the_chat_tail():
+    engine = ChatFramedEngine(
+        _queued(_peaked_logits(4096, high_index=0), _peaked_logits(4096, high_index=0))
+    )
+    primed = prime(engine, "ROUTE TICKETS")
+    decide(engine, "a ticket", _CHOICE, primed=primed)
+    last = _squash(engine.decode_text(engine.step_calls[-1]))
+    assert last.endswith(_squash(ChatFramedEngine.TAIL))
+    assert _squash("Answer with a single letter:") in last
+
+
+def test_unprimed_path_also_opens_the_user_turn():
+    engine = ChatFramedEngine(_queued(_peaked_logits(4096, high_index=0)))
+    decide(engine, "a ticket", _CHOICE)
+    first = _squash(engine.decode_text(engine.step_calls[-1]))
+    assert first.startswith(_squash("<|s|>system"))
+    assert _squash("a ticket") in first
+
+
+def test_engine_without_a_template_is_left_alone():
+    engine = FakeEngine(_queued(_peaked_logits(4096, high_index=0)))
+    assert not hasattr(engine, "chat_frame")
+    decision = decide(engine, "a ticket", _CHOICE)
+    assert decision.value in _CHOICE.options
+    assert "<|s|>" not in _squash(engine.decode_text(engine.step_calls[-1]))

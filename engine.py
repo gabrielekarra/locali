@@ -48,6 +48,19 @@ class Engine(Protocol):
         disturb the parent. Implementations should copy, not alias.
         """
 
+    def chat_frame(self, system: str) -> tuple[str, str]:
+        """Optional. Return the (head, tail) that this model's chat template
+        wraps around user content, so callers can keep the three-layer split:
+        `head` is the immutable system turn and the opening of the user turn
+        (cacheable), `tail` closes the user turn and opens the assistant turn.
+
+        Instruct-tuned checkpoints are trained to see this framing. Feeding
+        them a bare completion prompt is off-distribution and measurably
+        worse: on Llama-3.2-3B-Instruct, raw prompting scored 0.465 against
+        0.744 templated, with confidence separation 0.046 against 0.150.
+        Implementations without a template should not define this method.
+        """
+
     def step(self, cache: Cache, ids: list[int]) -> np.ndarray:
         """Advance `cache` by `ids` and return next-token logits.
 

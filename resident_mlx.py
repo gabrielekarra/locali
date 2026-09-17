@@ -74,6 +74,33 @@ class ResidentMLX:
         mx.eval(last, [c.state for c in kv])
         return _State(kv=kv, logits=last)
 
+    def chat_frame(self, system: str) -> tuple[str, str]:
+        """(head, tail) around user content for this model's chat template.
+
+        Rendered with a sentinel in place of the content so the split survives
+        whatever the template puts on either side. Templates that reject a
+        system role (Gemma) get the system text folded into the user turn.
+        """
+        sentinel = "\x00LOCALI_CONTENT\x00"
+        user = {"role": "user", "content": sentinel}
+        attempts = []
+        if system:
+            attempts.append([{"role": "system", "content": system}, user])
+            attempts.append([{"role": "user", "content": system + "\n\n" + sentinel}])
+        else:
+            attempts.append([user])
+        for messages in attempts:
+            try:
+                rendered = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            except Exception:
+                continue
+            head, found, tail = rendered.partition(sentinel)
+            if found:
+                return head, tail
+        raise NotImplementedError(f"{self.name} has no usable chat template")
+
     def fork(self, cache: _State) -> _State:
         return _State(
             kv=[_clone_cache_entry(c) for c in cache.kv],
