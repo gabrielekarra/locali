@@ -1,0 +1,84 @@
+{
+  "model": "mlx-community/Qwen3-4B-4bit",
+  "checkpoint_path": "/Users/gabrielekarra/dev/locali/.runtime/models/Qwen3-4B-4bit",
+  "vocab_size": 151936,
+  "disk_bytes": 2278975098,
+  "resident_active_bytes": 2264693768,
+  "resident_peak_bytes": 2982837344,
+  "prefill_200": {
+    "tokens": 200,
+    "median_seconds": 0.6464196249999077,
+    "tok_s": 309.3965471732523,
+    "samples_seconds": [
+      0.6464196249999077,
+      0.6452712079999401,
+      0.6464801250003802
+    ]
+  },
+  "prefill_512": {
+    "tokens": 512,
+    "median_seconds": 1.4990642500006288,
+    "tok_s": 341.5464013632406,
+    "samples_seconds": [
+      1.4974407919999067,
+      1.4990642500006288,
+      1.500272207999842
+    ]
+  },
+  "ttft": {
+    "prompt_tokens": 32,
+    "median_seconds": 0.09907504200054973,
+    "samples_seconds": [
+      0.09907504200054973,
+      0.09900920800009771,
+      0.10045120799986762
+    ]
+  },
+  "decision_ms": {
+    "prefix_tokens": 85,
+    "state_tokens": 37,
+    "total_tokens": 122,
+    "median_ms": 382.16962500064255,
+    "samples_ms": [
+      382.16962500064255,
+      384.0697089999594,
+      379.59350000073755
+    ]
+  },
+  "decision_ms_primed": {
+    "prefix_tokens": 85,
+    "state_tokens": 37,
+    "median_ms": 194.76354100061144,
+    "samples_ms": [
+      193.71975000012753,
+      195.4898329995558,
+      194.76354100061144
+    ]
+  },
+  "decode_128": {
+    "tokens": 128,
+    "median_seconds": 3.59541524999986,
+    "tok_s": 35.600894778427886,
+    "samples_seconds": [
+      3.572022416999971,
+      3.686303708000196,
+      3.59541524999986
+    ]
+  },
+  "reps": 3,
+  "gate": {
+    "decision_ms_primed_threshold_ms": 250.0,
+    "resident_gb_threshold": 6.0,
+    "decision_ms_primed_ms": 194.76354100061144,
+    "resident_peak_gb": 2.982837344,
+    "pass": true
+  },
+  "meta": {
+    "corpus": "/Users/gabrielekarra/dev/locali/eval/pride_prejudice.txt",
+    "python": "3.12.12",
+    "mlx": "0.32.0",
+    "mlx_lm": "0.31.3",
+    "platform": "macOS-27.0-arm64-arm-64bit",
+    "timestamp": "2026-09-17T08:59:09.010051+00:00"
+  }
+}

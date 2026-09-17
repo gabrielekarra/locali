@@ -1,0 +1,84 @@
+{
+  "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+  "checkpoint_path": "/Users/gabrielekarra/dev/locali/.runtime/models/Llama-3.2-1B-Instruct-4bit",
+  "vocab_size": 128256,
+  "disk_bytes": 712596168,
+  "resident_active_bytes": 695244808,
+  "resident_peak_bytes": 1390712968,
+  "prefill_200": {
+    "tokens": 200,
+    "median_seconds": 0.19210649999968155,
+    "tok_s": 1041.0891875096966,
+    "samples_seconds": [
+      0.191470957999627,
+      0.19210649999968155,
+      0.19244766599967988
+    ]
+  },
+  "prefill_512": {
+    "tokens": 512,
+    "median_seconds": 0.44589600000017526,
+    "tok_s": 1148.249816100164,
+    "samples_seconds": [
+      0.44589600000017526,
+      0.447351124999841,
+      0.43837041599999793
+    ]
+  },
+  "ttft": {
+    "prompt_tokens": 32,
+    "median_seconds": 0.03112354199947731,
+    "samples_seconds": [
+      0.03115350000007311,
+      0.03112354199947731,
+      0.03109554200000275
+    ]
+  },
+  "decision_ms": {
+    "prefix_tokens": 85,
+    "state_tokens": 37,
+    "total_tokens": 122,
+    "median_ms": 111.99320899959275,
+    "samples_ms": [
+      112.19120799978555,
+      111.99320899959275,
+      111.80804200012062
+    ]
+  },
+  "decision_ms_primed": {
+    "prefix_tokens": 85,
+    "state_tokens": 37,
+    "median_ms": 57.65241699918988,
+    "samples_ms": [
+      57.22016700019594,
+      57.65241699918988,
+      58.521499999187654
+    ]
+  },
+  "decode_128": {
+    "tokens": 128,
+    "median_seconds": 1.2414200410003104,
+    "tok_s": 103.10772806346856,
+    "samples_seconds": [
+      2.1154192919993875,
+      1.236385459000303,
+      1.2414200410003104
+    ]
+  },
+  "reps": 3,
+  "gate": {
+    "decision_ms_primed_threshold_ms": 250.0,
+    "resident_gb_threshold": 6.0,
+    "decision_ms_primed_ms": 57.65241699918988,
+    "resident_peak_gb": 1.390712968,
+    "pass": true
+  },
+  "meta": {
+    "corpus": "/Users/gabrielekarra/dev/locali/eval/pride_prejudice.txt",
+    "python": "3.12.12",
+    "mlx": "0.32.0",
+    "mlx_lm": "0.31.3",
+    "platform": "macOS-27.0-arm64-arm-64bit",
+    "timestamp": "2026-09-17T09:04:09.433392+00:00"
+  }
+}

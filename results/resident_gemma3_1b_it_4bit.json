@@ -1,0 +1,84 @@
+{
+  "model": "mlx-community/gemma-3-1b-it-4bit",
+  "checkpoint_path": "/Users/gabrielekarra/dev/locali/.runtime/models/gemma-3-1b-it-4bit",
+  "vocab_size": 262144,
+  "disk_bytes": 771866734,
+  "resident_active_bytes": 735852826,
+  "resident_peak_bytes": 1393341058,
+  "prefill_200": {
+    "tokens": 200,
+    "median_seconds": 0.1624729169998318,
+    "tok_s": 1230.97439064387,
+    "samples_seconds": [
+      0.16124554200087005,
+      0.1624729169998318,
+      0.16337891700004548
+    ]
+  },
+  "prefill_512": {
+    "tokens": 512,
+    "median_seconds": 0.38127620899922476,
+    "tok_s": 1342.8585049770074,
+    "samples_seconds": [
+      0.38127620899922476,
+      0.38229287500053033,
+      0.3777158329994563
+    ]
+  },
+  "ttft": {
+    "prompt_tokens": 32,
+    "median_seconds": 0.027303458000460523,
+    "samples_seconds": [
+      0.027325540999299847,
+      0.027303458000460523,
+      0.027301375000206463
+    ]
+  },
+  "decision_ms": {
+    "prefix_tokens": 86,
+    "state_tokens": 41,
+    "total_tokens": 127,
+    "median_ms": 97.0016660003239,
+    "samples_ms": [
+      96.52208300030907,
+      97.0016660003239,
+      97.13120900050853
+    ]
+  },
+  "decision_ms_primed": {
+    "prefix_tokens": 86,
+    "state_tokens": 41,
+    "median_ms": 49.58416699992085,
+    "samples_ms": [
+      49.58416699992085,
+      49.3105839996133,
+      49.728125000001455
+    ]
+  },
+  "decode_128": {
+    "tokens": 128,
+    "median_seconds": 1.1002410829996734,
+    "tok_s": 116.33813895680352,
+    "samples_seconds": [
+      1.0992216659997212,
+      1.1002410829996734,
+      1.1532734159991378
+    ]
+  },
+  "reps": 3,
+  "gate": {
+    "decision_ms_primed_threshold_ms": 250.0,
+    "resident_gb_threshold": 6.0,
+    "decision_ms_primed_ms": 49.58416699992085,
+    "resident_peak_gb": 1.393341058,
+    "pass": true
+  },
+  "meta": {
+    "corpus": "/Users/gabrielekarra/dev/locali/eval/pride_prejudice.txt",
+    "python": "3.12.12",
+    "mlx": "0.32.0",
+    "mlx_lm": "0.31.3",
+    "platform": "macOS-27.0-arm64-arm-64bit",
+    "timestamp": "2026-09-17T09:04:24.393264+00:00"
+  }
+}
