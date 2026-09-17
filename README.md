@@ -1,134 +1,161 @@
-# Locali — DeepSeek V4 Flash on consumer hardware
+# Locali — local inference on consumer hardware
 
-Locali runs `DeepSeek-V4-Flash-0731` on Apple Silicon even when the routed
-experts do not fit in unified memory. The dense MLX backbone stays resident;
-the 256 routed experts are read from SSD into a fixed-size unified-memory arena
-and consumed in place by Metal kernels.
+Locali runs models locally on machines that should not be able to run them,
+and reports what that actually costs. Every number here was measured on a
+fanless 10-core Apple M4 MacBook Air with 24 GB of unified memory; the JSON
+behind each table is in `results/`.
 
-The current target is a 24 GB Apple M4 MacBook Air. With the published
-2.44-bit mixed MLX checkpoint, Locali keeps about 6.49 GB of dense weights and a
-6.99 GB expert arena resident. On the bundled benchmark corpus, two final
-64-token prefill + 128-token decode replicas measured 2.32-2.34 generated
-tokens/s and 2.37-2.38 steady tokens/s.
+The repository holds three paths that share one idea: the cost of local
+inference is `work per forward pass x number of forward passes`, and most of
+the available speed is in the second term, not the first.
 
-## Run the chat
+## 1. Typed decisions
 
-The optimized local layout expects:
+Generating a sentence to answer a question that has four possible answers
+costs one forward pass per token. Answering it as a *typed decision* costs
+one, total.
 
-- `mlx-community/DeepSeek-V4-Flash-0731-2.4bit-mixed` under `.runtime/models/`;
-- the DeepSeek V4 MLX implementation from oMLX under `.runtime/omlx/`;
-- a Locali expert index under `models/`.
+A question is a `Choice`, a `Score` or a `Bool`. The engine prefills the state
+once, then reads logits at a single position, masked to the tokens that can
+begin a valid option. Nothing off-schema can be returned, and the returned
+probability is meant to be trusted rather than displayed.
 
-One-time setup:
+```python
+from resident_mlx import ResidentMLX
+from schema import Choice
+from decide import decide, prime
 
-```sh
-uv sync
-git clone --depth 1 https://github.com/jundot/omlx.git .runtime/omlx
-.venv/bin/hf download mlx-community/DeepSeek-V4-Flash-0731-2.4bit-mixed \
-  --local-dir .runtime/models/DeepSeek-V4-Flash-0731-2.4bit-mixed
+engine = ResidentMLX("mlx-community/Qwen3-4B-4bit")
+primed = prime(engine, "You route support tickets. Answer with a single letter.")
 
-.venv/bin/python dsv4_index.py \
-  --snapshot .runtime/models/DeepSeek-V4-Flash-0731-2.4bit-mixed \
-  --out models/dsv4-2.4bit.idx
+question = Choice(name="dept", question="Which department?",
+                  options=("billing", "technical", "sales"))
+d = decide(engine, "Ticket: 'Charged twice, need a refund.'", question, primed=primed)
+# d.value 'billing'   d.confidence 1.000   d.schema_mass 1.000
 ```
 
-Start the text-only TUI:
+`prime()` prefills the immutable system prefix once and every later call forks
+it, which is worth 2.5x (477 ms to 190.6 ms). `decide_many()` answers K
+questions from one prefill; against re-fusing the state each time it wins
+1.83x at K=8, with fork itself costing 0.04 ms.
 
-```sh
-python deepseek_v4.py --nothink
-```
+`schema_mass` is the share of the model's probability that landed on any valid
+option. It is reported, not hidden inside the renormalization, because it is
+how a silent failure becomes visible. It has caught three in this repository:
+a readout aimed at a token holding 0.000000 of the mass, an instruct model
+being fed a bare completion prompt, and a reasoning model answering `<think>`
+instead of an answer.
 
-The fixed BOS/system prefix is evaluated before `locali>` appears, so only the
-new user suffix is processed after submission. Output streams token by token
-through one persistent multi-turn KV cache.
+### Calibration
 
-The aggressive 2.44-bit checkpoint defaults to deterministic greedy decoding
-and a direct-answer system prompt. Stochastic sampling remains explicit:
+`calibration.py` fits temperature, vector or isotonic scaling on a labelled
+split and reports ECE, MCE, Brier and NLL. Calibration reshapes confidence; it
+never overturns which option was chosen.
 
-```sh
-python deepseek_v4.py --nothink --temp 1 --top-p 1 --min-p 0.05
-```
+Six resident 4-bit checkpoints over the 181-case fixture in `eval/`:
 
-`--system` overrides the interactive prompt. `--seed` makes sampling
-reproducible; without it, sampling uses OS entropy.
+| model | accuracy | separation | ECE after | schema mass | primed decision |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-4B | 0.653 | 0.117 | 0.152 | 1.000 | 194.8 ms |
+| Llama-3.2-3B | 0.569 | 0.306 | 0.123 | 0.994 | 149.8 ms |
+| Qwen3-1.7B | 0.486 | 0.133 | 0.147 | 0.997 | 85.6 ms |
+| Llama-3.2-1B | 0.472 | 0.146 | 0.137 | 0.963 | 57.7 ms |
+| Qwen3-0.6B | 0.389 | 0.125 | 0.150 | 0.264 | 34.6 ms |
+| gemma-3-1b | 0.347 | 0.160 | 0.144 | 1.000 | 49.6 ms |
 
-## Packed expert layout
+`separation` is mean confidence when correct minus mean confidence when wrong.
+It decides whether a confidence threshold can gate anything, and at 0.12 to
+0.31 it is currently too weak to build an escalation cascade on. That is the
+open problem, stated rather than smoothed over.
 
-The base checkpoint runs directly, but the expert-major pack collapses nine
-sparse tensor reads per expert into one vectored read:
+Accuracy is reported against a bag-of-words Naive Bayes floor, computed per
+family and shipped in `eval_calibration.py` as a standing guard. On the
+entailment family that floor is 0.62 and no model clears it. On sentiment it
+is 0.28 and every model clears it by a wide margin. These checkpoints do
+surface perception well and inference poorly, and a fixture that cannot show
+the difference is not measuring anything — an earlier templated fixture was
+solved outright by that Naive Bayes, at 1.00 on three families of four.
 
-```sh
-.venv/bin/python pack_experts.py \
-  --index models/dsv4-2.4bit.idx \
-  --data .runtime/models/dsv4-experts.pack \
-  --out-index models/dsv4-2.4bit-packed.idx \
-  --layers all --tiers cold
-```
+## 2. Per-frame decisions
 
-The checkpoint is about 92.8 GB decimal. The optional pack adds about 77.9 GB,
-so the fully optimized installation needs roughly 171 GB before filesystem
-overhead. The unpacked layout needs about 100 GB and remains supported.
+A monitoring stream asks the same small question of every frame. It does not
+need prose, so the typed-decision path above applies directly: one constrained
+readout per frame.
 
-## Engine
+What dominates is the image, not the prompt. A frame becomes image tokens, and
+latency is close to linear in how many:
 
-- `dsv4_engine.py` loads only the resident backbone and installs streamed MoE
-  modules in all 43 transformer layers.
-- `arena.py` owns the bounded SSD-to-unified-memory expert cache.
-- `dsv4_arena.py` implements V4 top-6 routing, clamped SwiGLU and affine
-  `gather_qmm` over arena slots.
-- `native/locali_core.c` provides the allocation-free SLRU/LFU scheduler used
-  in the decode loop.
-- `dsv4_kernels.py` contains optional fused Metal/CUDA expert kernels. They are
-  benchmark flags and stay off when they lose to stock MLX kernels.
-- `dsv4_index.py` and `pack_experts.py` build the zero-copy layouts.
+| frame | image tokens | ms/frame | fps |
+|---|---:|---:|---:|
+| 1280x960 | 1233 | 13601 | 0.07 |
+| 640x480 | 333 | 3023 | 0.33 |
+| 448x336 | 173 | 1517 | 0.66 |
+| 320x240 | 113 | 967 | 1.03 |
+| 224x168 | 103 | 1048 | 0.95 |
 
-DSpark/MTP stages embedded in the checkpoint can be indexed and benchmarked,
-but are disabled for chat because their measured draft acceptance does not
-repay the extra expert traffic on this SSD-streamed path.
+Measured with Qwen3-VL-4B-Instruct-4bit, median of 3 after warm-up. Cost per
+image token is roughly 9 ms and rises slightly with sequence length, as
+attention should. Below about 320x240 the count stops falling and the floor is
+elsewhere.
 
-## Benchmark and quality checks
+Two consequences worth stating plainly. Caching the text prefix buys little
+here, because the text is a small share of the tokens. And resolution is the
+largest single control available: 1280x960 to 448x336 is 9x, and it is a
+product question — what resolution actually resolves the thing being watched —
+rather than a kernel one.
 
-Canonical performance run:
+The next lever is temporal: consecutive frames in a fixed-camera stream are
+nearly identical, so most of them need no inference at all. That work is in
+progress and no number is claimed for it yet.
 
-```sh
-.venv/bin/python dsv4_bench.py \
-  --index models/dsv4-2.4bit-packed.idx \
-  --ceiling-gb 7 --os-cache \
-  --out results/deepseek_v4_flash_final.json
-```
+## 3. Streamed experts
 
-The final two replicas measured:
+The third path runs a model whose routed experts do not fit in unified memory.
+`DeepSeek-V4-Flash-0731` at 2.44-bit keeps a 6.49 GB dense backbone resident
+and streams 256 routed experts from SSD through a fixed 6.99 GB arena.
 
-| Run | Prefill | Decode | Steady | Expert hit | Expert bytes read |
+| Run | Prefill | Decode | Steady | Expert hit | Bytes read |
 |---|---:|---:|---:|---:|---:|
 | 1 | 5.61 t/s | 2.32 t/s | 2.37 t/s | 60.6% | 92.14 GB |
 | 2 | 5.71 t/s | 2.34 t/s | 2.38 t/s | 60.6% | 92.14 GB |
 
-Decode speed is routing-sensitive: this corpus produces a lower expert hit rate
-than earlier traces, so the JSON includes hit rate, bytes read and I/O stall
-alongside throughput.
+That is 719.8 MB read per decoded token at an effective 3.11 GB/s, so 231.5 ms
+of the 430 ms per token is I/O stall. With perfect overlap the ceiling is
+4.32 tok/s, which leaves 1.86x for all remaining engineering and no more. The
+way past a wall like that is to stop paying per token, which is what the first
+two paths do.
 
-Teacher-forced continuation check:
+- `dsv4_engine.py` loads the resident backbone and installs streamed MoE
+- `arena.py` owns the bounded SSD-to-memory expert cache
+- `native/locali_core.c` is the allocation-free SLRU/LFU scheduler
+- `dsv4_index.py` and `pack_experts.py` build the zero-copy layouts
 
-```sh
-.venv/bin/python dsv4_quality.py \
-  --index models/dsv4-2.4bit-packed.idx --ceiling-gb 7
-```
-
-The 20-case fixture is self-contained in
-`eval/deepseek_v4_flash_20.jsonl`. The measured 2.44-bit checkpoint reached
-average NLL 0.73796, perplexity 2.09 and 81.9% token top-1 on its 480 target
-tokens. These values measure the checkpoint; the streaming implementation
-executes its expert bytes exactly.
-
-Run the test suite with:
-
-```sh
-pytest -q
-```
-
-The repository cleanup baseline is `20 passed`; the native C target also builds
-with `-Werror` and reports `locali_core: all tests passed`.
-
-Detailed measurements are recorded in
+Setup, the packed expert layout and the chat TUI are documented in
 `results/deepseek_v4_flash_locali_m4_24gb_20260805.md`.
+
+## Running things
+
+```sh
+uv sync
+pytest -q                                   # 121 passed, 1 skipped
+
+python bench_resident.py --model mlx-community/Qwen3-4B-4bit \
+    --out results/resident_qwen3_4b_4bit.json
+python eval_calibration.py --model mlx-community/Qwen3-4B-4bit
+```
+
+Checkpoints download into `.runtime/models/` on first use.
+
+## Measuring
+
+Two rules this repository learned the expensive way.
+
+Audit the instrument, not only the code. A labelled fixture that a
+bag-of-words classifier can solve measures template matching. A readout can be
+aimed at a token that carries none of the model's probability and still return
+the right answer often enough to look correct.
+
+Time with the variants interleaved inside each repetition, at least five
+repetitions, report the min/max spread next to the median, and check the
+machine is idle first. On a fanless part under concurrent load this repository
+produced a table in which K=4 was slower than K=8.
