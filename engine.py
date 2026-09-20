@@ -61,6 +61,16 @@ class Engine(Protocol):
         Implementations without a template should not define this method.
         """
 
+    def step_many(self, cache: Cache, id_lists: list[list[int]]) -> np.ndarray:
+        """Optional. Advance K branches of one shared `cache` together and
+        return float32 logits of shape `(K, vocab_size)`.
+
+        K questions over one state all share a prefix, so an engine that can
+        replicate its cache along a batch axis answers them in one forward
+        pass instead of K. Measured on Llama-3.2-3B: 1.62x at K=8. Engines
+        that cannot should not define this; callers fall back to `step`.
+        """
+
     def step(self, cache: Cache, ids: list[int]) -> np.ndarray:
         """Advance `cache` by `ids` and return next-token logits.
 

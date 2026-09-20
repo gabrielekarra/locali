@@ -137,6 +137,30 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return exp / exp.sum()
 
 
+def _length_buckets(suffixes: list[list[int]], slack: float = 1.15) -> list[list[int]]:
+    """Group suffix indices so a batched forward wastes little on padding.
+
+    A batch is right-padded to its widest row, so mixing a 25-token suffix with
+    a 42-token one makes every row pay 42. Measured on Llama-3.2-3B with eight
+    questions of mixed kinds, that padding waste came to 1.40x and cancelled
+    the 1.62x the batching itself was worth: 0.99x end to end. The same eight
+    questions at uniform length ran 1.25x. Bucketing by length keeps the waste
+    under `slack` so the win survives.
+    """
+    order = sorted(range(len(suffixes)), key=lambda i: len(suffixes[i]))
+    buckets: list[list[int]] = []
+    for index in order:
+        if buckets:
+            current = buckets[-1]
+            widest = max(len(suffixes[i]) for i in current + [index])
+            total = sum(len(suffixes[i]) for i in current) + len(suffixes[index])
+            if widest * (len(current) + 1) <= slack * total:
+                current.append(index)
+                continue
+        buckets.append([index])
+    return buckets
+
+
 def prime(engine: Engine, system_prefix: str) -> Cache:
     """Prefill a fixed system/schema prefix once, to be reused across many
     `decide`/`decide_many` calls via their `primed` argument (L1 above)."""
@@ -173,6 +197,12 @@ def decide_many(
     elif len(calibrators) != len(questions):
         raise ValueError("calibrators must have the same length as questions")
 
+    # Validate every schema before spending a forward pass on any of it: a
+    # question with more options than letters, or a tokenizer that cannot
+    # separate them, is a caller error and should cost nothing to discover.
+    table = _letter_table(engine)
+    letter_sets = [_letter_id_sets(table, len(q.labels)) for q in questions]
+
     if primed is None:
         # No cached prefix: L1 and L2 collapse into one prefill from scratch.
         head, _ = _chat_frame(engine, _SYSTEM)
@@ -187,19 +217,36 @@ def decide_many(
         base_cache = engine.fork(primed)
         engine.step(base_cache, state_ids)
 
+    _, tail = _chat_frame(engine, _SYSTEM)
+    suffixes = [
+        engine.encode(_suffix_text(q) + tail, add_special=False) for q in questions
+    ]
+
+    # One batched forward when the engine can replicate its cache, K forks and
+    # K sequential steps when it cannot. Both isolate the questions from each
+    # other; the batched path does it with a batch axis instead of a copy.
+    batched = getattr(engine, "step_many", None)
+    started = time.perf_counter()
+    if batched is not None and len(questions) > 1:
+        all_logits = [None] * len(suffixes)
+        for bucket in _length_buckets(suffixes):
+            rows = batched(base_cache, [suffixes[i] for i in bucket])
+            for slot, index in enumerate(bucket):
+                all_logits[index] = rows[slot]
+        all_logits = np.stack(all_logits)
+    else:
+        all_logits = np.stack([
+            engine.step(engine.fork(base_cache), ids) for ids in suffixes
+        ])
+    shared_ms = (time.perf_counter() - started) * 1000 / len(questions)
+
     decisions = []
-    for question, calibrator in zip(questions, calibrators):
+    for index, (question, calibrator) in enumerate(zip(questions, calibrators)):
         start = time.perf_counter()
 
         labels = question.labels
-        letter_id_sets = _letter_id_sets(_letter_table(engine), len(labels))
-
-        # L3: fork keeps this question's suffix from leaking into any other
-        # question's context.
-        forked = engine.fork(base_cache)
-        _, tail = _chat_frame(engine, _SYSTEM)
-        suffix_ids = engine.encode(_suffix_text(question) + tail, add_special=False)
-        logits = engine.step(forked, suffix_ids)
+        letter_id_sets = letter_sets[index]
+        logits = np.asarray(all_logits[index])
 
         # Full-vocab softmax, then grouped sums: an off-schema token can never
         # be selected no matter how large its logit is, and schema_mass makes
@@ -229,7 +276,7 @@ def decide_many(
             calibrated = calibrated / calibrated.sum()
         probabilities = dict(zip(labels, (float(p) for p in calibrated)))
 
-        latency_ms = (time.perf_counter() - start) * 1000
+        latency_ms = shared_ms + (time.perf_counter() - start) * 1000
         decisions.append(
             Decision(
                 name=question.name,

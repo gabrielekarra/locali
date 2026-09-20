@@ -5,6 +5,7 @@ import string
 import numpy as np
 import pytest
 
+import decide as decide_mod
 from decide import _letter_id_sets, _suffix_text, decide, decide_many, prime
 from schema import Bool, Choice, Score, decision_key
 
@@ -419,3 +420,59 @@ def test_engine_without_a_template_is_left_alone():
     decision = decide(engine, "a ticket", _CHOICE)
     assert decision.value in _CHOICE.options
     assert "<|s|>" not in _squash(engine.decode_text(engine.step_calls[-1]))
+
+
+def test_length_buckets_keeps_similar_suffixes_together():
+    suffixes = [[0] * n for n in (27, 25, 42, 27, 27, 27, 26, 39)]
+    buckets = decide_mod._length_buckets(suffixes)
+    widths = [sorted(len(suffixes[i]) for i in b) for b in buckets]
+    assert widths == [[25, 26, 27, 27, 27, 27], [39, 42]]
+    assert sorted(i for b in buckets for i in b) == list(range(len(suffixes)))
+
+
+def test_length_buckets_never_exceeds_the_padding_slack():
+    rng = np.random.default_rng(0)
+    suffixes = [[0] * int(n) for n in rng.integers(5, 80, size=40)]
+    for bucket in decide_mod._length_buckets(suffixes, slack=1.15):
+        widest = max(len(suffixes[i]) for i in bucket)
+        total = sum(len(suffixes[i]) for i in bucket)
+        assert widest * len(bucket) <= 1.15 * total + 1e-9
+
+
+def test_length_buckets_handles_one_and_none():
+    assert decide_mod._length_buckets([]) == []
+    assert decide_mod._length_buckets([[1, 2, 3]]) == [[0]]
+
+
+class BatchedFakeEngine(FakeEngine):
+    """A FakeEngine that answers K branches in one call, like ResidentMLX."""
+
+    def __init__(self, logits_fn):
+        super().__init__(logits_fn)
+        self.step_many_calls: list[list[list[int]]] = []
+
+    def step_many(self, cache, id_lists):
+        self.step_many_calls.append([list(ids) for ids in id_lists])
+        return np.stack([self._logits_fn(list(cache) + list(ids)) for ids in id_lists])
+
+
+def test_batched_engine_answers_every_question_in_one_call():
+    engine = BatchedFakeEngine(lambda cache: _peaked_logits(4096, high_index=0))
+    questions = [_CHOICE, _CHOICE, _CHOICE]
+    decisions = decide_many(engine, "a ticket", questions)
+    assert len(decisions) == 3
+    assert all(d.value in _CHOICE.options for d in decisions)
+    # one prefill, and the readouts went through step_many rather than K steps
+    assert engine.prefill_calls == 1
+    assert len(engine.step_many_calls) == 1
+    assert len(engine.step_many_calls[0]) == 3
+    assert engine.step_calls == []
+
+
+def test_batched_path_still_validates_schemas_before_any_forward_pass():
+    engine = BatchedFakeEngine(lambda cache: _peaked_logits(4096, high_index=0))
+    too_many = Choice(name="big", question="?", options=tuple(f"opt{i}" for i in range(27)))
+    with pytest.raises(ValueError):
+        decide_many(engine, "a ticket", [too_many])
+    assert engine.prefill_calls == 0
+    assert engine.step_many_calls == []
