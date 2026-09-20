@@ -6,17 +6,36 @@ Skips cleanly when no resident model has been downloaded yet.
 from __future__ import annotations
 
 import numpy as np
+import json
+
 import pytest
 
 from resident_mlx import DEFAULT_MODELS_DIR, ResidentMLX
 
 
 def _available_model():
+    """The first checkpoint ResidentMLX can actually load.
+
+    `.runtime/models` also holds vision-language checkpoints, which have no
+    top-level `vocab_size` and belong to bench_frame.py, not here. Taking the
+    first directory alphabetically broke this suite the moment a VLM sorted
+    ahead of a text model, so the config is checked rather than the name.
+    """
     if not DEFAULT_MODELS_DIR.is_dir():
         return None
     for child in sorted(DEFAULT_MODELS_DIR.iterdir()):
-        if (child / "config.json").is_file():
-            return child
+        config = child / "config.json"
+        if not config.is_file():
+            continue
+        try:
+            loaded = json.loads(config.read_text())
+        except (OSError, ValueError):
+            continue
+        if "vision_config" in loaded or "vision_tower" in loaded:
+            continue
+        if "vocab_size" not in loaded:
+            continue
+        return child
     return None
 
 
