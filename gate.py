@@ -48,6 +48,29 @@ def signature(frame: np.ndarray, grid: int = 16) -> np.ndarray:
     return out / peak
 
 
+def changed_area(frame: np.ndarray, reference: np.ndarray, epsilon: float = 0.08) -> float:
+    """Fraction of pixels that moved at all, ignoring by how much.
+
+    Screens and cameras fail differently. A camera drifts and the whole image
+    shifts a little, so mean luminance is the right signal. A screen changes a
+    few pixels a lot and the rest not at all, and its noise floor is exactly
+    zero — captures of an unchanged screen are identical.
+
+    Magnitude cannot separate a blinking caret from a word changing: measured
+    on a rendered editor, the two sit within 1x of each other at every grid
+    size, because a small bright caret moves as much luminance as a word does.
+    By area they differ by 9x, because the caret is tens of pixels and the word
+    is thousands. So screens are gated on how much of the picture moved, not on
+    how far it moved.
+    """
+    if frame.shape != reference.shape:
+        raise ValueError(f"frame {frame.shape} does not match reference {reference.shape}")
+    a = frame.mean(axis=2) if frame.ndim == 3 else frame
+    b = reference.mean(axis=2) if reference.ndim == 3 else reference
+    peak = 255.0 if max(a.max(), b.max()) > 1.0 else 1.0
+    return float((np.abs(a - b) / peak > epsilon).mean())
+
+
 @dataclass(frozen=True)
 class GateVerdict:
     infer: bool
@@ -63,23 +86,40 @@ class FrameGate:
     so it is in the same units regardless of resolution or bit depth.
     """
 
-    def __init__(self, threshold: float = 0.02, grid: int = 16, max_age: int | None = 30):
+    def __init__(
+        self,
+        threshold: float = 0.02,
+        grid: int = 16,
+        max_age: int | None = 30,
+        metric: str = "luminance",
+        epsilon: float = 0.08,
+    ):
         if threshold < 0:
             raise ValueError("threshold must be non-negative")
+        if metric not in ("luminance", "area"):
+            raise ValueError("metric must be 'luminance' (camera) or 'area' (screen)")
         if max_age is not None and max_age < 1:
             raise ValueError("max_age must be at least 1 frame, or None to disable")
         self.threshold = threshold
         self.grid = grid
         self.max_age = max_age
+        self.metric = metric
+        self.epsilon = epsilon
         self._reference: np.ndarray | None = None
         self._age = 0
 
+    def _signature(self, frame: np.ndarray) -> np.ndarray:
+        # The area metric compares whole frames, so it keeps the frame itself.
+        return frame if self.metric == "area" else signature(frame, self.grid)
+
     def check(self, frame: np.ndarray) -> GateVerdict:
         """Classify `frame` without committing; `accept` records the decision."""
-        sig = signature(frame, self.grid)
         if self._reference is None:
             return GateVerdict(True, "first", float("inf"), 0)
-        distance = float(np.abs(sig - self._reference).mean())
+        if self.metric == "area":
+            distance = changed_area(frame, self._reference, self.epsilon)
+        else:
+            distance = float(np.abs(signature(frame, self.grid) - self._reference).mean())
         age = self._age + 1
         if distance >= self.threshold:
             return GateVerdict(True, "changed", distance, age)
@@ -92,7 +132,7 @@ class FrameGate:
         reference; a skipped frame leaves the reference alone, which is what
         makes slow drift accumulate rather than reset."""
         if verdict.infer:
-            self._reference = signature(frame, self.grid)
+            self._reference = self._signature(frame)
             self._age = 0
         else:
             self._age += 1
@@ -103,4 +143,4 @@ class FrameGate:
         return verdict
 
 
-__all__ = ["FrameGate", "GateVerdict", "signature"]
+__all__ = ["FrameGate", "GateVerdict", "changed_area", "signature"]

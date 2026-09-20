@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from gate import FrameGate, signature
+from gate import FrameGate, changed_area, signature
 from scene import Event, synthetic_sequence
 
 
@@ -108,3 +108,58 @@ def test_gate_catches_every_event_at_the_documented_threshold():
     for e in events:
         assert inferred & set(range(e.start, e.start + e.length)), f"missed {e}"
     assert len(inferred) / len(frames) < 0.15  # and still skips most frames
+
+
+def _panel(mark: str = "", caret: bool = False) -> np.ndarray:
+    """A dark panel with a small bright mark, standing in for screen content."""
+    frame = np.full((128, 192), 30, dtype=np.uint8)
+    if mark == "word":
+        frame[40:52, 20:80] = 220        # ~720 px, a word changing
+    if caret:
+        frame[60:72, 100:102] = 220      # ~24 px, a blinking caret
+
+
+    return frame
+
+
+def test_changed_area_reports_zero_for_an_identical_frame():
+    frame = _panel(caret=True)
+    assert changed_area(frame, frame.copy()) == 0.0
+
+
+def test_changed_area_separates_a_word_from_a_caret_by_area():
+    """Magnitude cannot tell these apart; area can.
+
+    A caret is a few tens of bright pixels and a word is a few hundred, so they
+    move comparable amounts of luminance. Only the count separates them.
+    """
+    base = _panel(caret=True)
+    caret_off = _panel(caret=False)
+    word = _panel(mark="word", caret=True)
+    assert changed_area(word, base) > 5 * changed_area(caret_off, base)
+
+
+# Why screens need the area metric is not asserted here. The property is that
+# luminance cannot separate a blinking caret from a word changing, and it holds
+# for antialiased rendered text, where a solid caret moves more luminance per
+# pixel than grey glyph edges do. Blocks of uniform contrast — all a portable
+# fixture can draw without depending on the host's fonts — give both metrics
+# the same ratio, so a synthetic test here would assert something it cannot
+# show. The measurement lives in gate.changed_area's docstring.
+
+
+def test_area_gate_skips_frames_that_did_not_change():
+    gate = FrameGate(threshold=0.005, max_age=None, metric="area")
+    frame = _panel(caret=True)
+    gate(frame)
+    assert [gate(frame.copy()).infer for _ in range(4)] == [False] * 4
+
+
+def test_changed_area_rejects_a_mismatched_shape():
+    with pytest.raises(ValueError):
+        changed_area(_panel(), np.zeros((64, 64), dtype=np.uint8))
+
+
+def test_gate_rejects_an_unknown_metric():
+    with pytest.raises(ValueError):
+        FrameGate(metric="entropy")
