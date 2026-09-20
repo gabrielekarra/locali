@@ -52,24 +52,42 @@ instead of an answer.
 split and reports ECE, MCE, Brier and NLL. Calibration reshapes confidence; it
 never overturns which option was chosen.
 
-Six resident 4-bit checkpoints over the 181-case fixture in `eval/`:
+Six resident 4-bit checkpoints over the 181-case fixture in `eval/`, with a
+95% bootstrap interval on every accuracy:
 
-| model | accuracy | separation | ECE after | schema mass | primed decision |
+| model | accuracy | 95% interval | separation | schema mass | primed decision |
 |---|---:|---:|---:|---:|---:|
-| Qwen3-4B | 0.653 | 0.117 | 0.152 | 1.000 | 194.8 ms |
-| Llama-3.2-3B | 0.569 | 0.306 | 0.123 | 0.994 | 149.8 ms |
-| Qwen3-1.7B | 0.486 | 0.133 | 0.147 | 0.997 | 85.6 ms |
-| Llama-3.2-1B | 0.472 | 0.146 | 0.137 | 0.963 | 57.7 ms |
-| Qwen3-0.6B | 0.389 | 0.125 | 0.150 | 0.264 | 34.6 ms |
-| gemma-3-1b | 0.347 | 0.160 | 0.144 | 1.000 | 49.6 ms |
+| Qwen3-4B | 0.653 | [0.542, 0.764] | 0.117 | 1.000 | 194.8 ms |
+| Llama-3.2-3B | 0.569 | [0.458, 0.681] | 0.306 | 0.994 | 149.8 ms |
+| Qwen3-1.7B | 0.486 | [0.375, 0.597] | 0.133 | 0.997 | 85.6 ms |
+| Llama-3.2-1B | 0.431 | [0.319, 0.556] | 0.159 | 0.956 | 57.7 ms |
+| Qwen3-0.6B | 0.389 | [0.278, 0.514] | 0.125 | 0.264 | 34.6 ms |
+| gemma-3-1b | 0.347 | [0.236, 0.458] | 0.160 | 1.000 | 49.6 ms |
+
+**This table does not establish an order.** Compared pairwise on the rows they
+both answered, no adjacent pair is distinguishable: the largest adjacent gap is
+0.083 with a paired interval of [-0.028, +0.194] and p = 0.164, and every other
+adjacent pair is weaker still. What the sample does support is the spread —
+Qwen3-4B over Qwen3-0.6B is +0.264, interval [+0.125, +0.403], p = 0.001.
+
+Resolving an 0.083 difference at 80% power would need about 262 test rows,
+roughly 654 fixture records against the present 181. Until then, picking a
+model off this table by its rank is reading noise. Read it for the spread, for
+schema mass, and for latency, which differ by far more than the accuracies do.
 
 `separation` is mean confidence when correct minus mean confidence when wrong.
 It decides whether a confidence threshold can gate anything, and at 0.12 to
-0.31 it is currently too weak to build an escalation cascade on. That is the
-open problem, stated rather than smoothed over.
+0.31 it is too weak to build an escalation cascade on. That is the open
+problem, and it sits ahead of any further latency work: a monitoring system
+that alerts on a confidence threshold is worth nothing if the confidence does
+not separate.
 
-Accuracy is reported against a bag-of-words Naive Bayes floor, computed per
-family and shipped in `eval_calibration.py` as a standing guard. On the
+`schema_mass` is worth reading beside accuracy. Qwen3-0.6B puts 0.264 of its
+probability on a valid option and renormalization hides the rest, so its
+accuracy describes a model that is mostly answering off-schema.
+
+Accuracy is also reported against a bag-of-words Naive Bayes floor, computed
+per family and shipped in `eval_calibration.py` as a standing guard. On the
 entailment family that floor is 0.62 and no model clears it. On sentiment it
 is 0.28 and every model clears it by a wide margin. These checkpoints do
 surface perception well and inference poorly, and a fixture that cannot show
