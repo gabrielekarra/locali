@@ -1,0 +1,34 @@
+{
+  "model": ".runtime/models/Qwen3.8-27B-4bit",
+  "load_average_before": 3.7138671875,
+  "load_average_after": 3.3349609375,
+  "quiet_machine": false,
+  "load_seconds": 5.7443987500009825,
+  "resident_gb": 16.055717352,
+  "peak_gb": 16.525096916,
+  "reps": 3,
+  "question": "Is there a person in the restricted zone?\nA. no\nB. yes\nAnswer with a single letter:",
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "rows": [
+    {
+      "width": 448,
+      "height": 336,
+      "prompt_tokens": 178,
+      "median_ms": 6283.181041995704,
+      "min_ms": 6206.139667003299,
+      "max_ms": 6752.059083002678,
+      "fps": 0.15915505113033854,
+      "ms_per_prompt_token": 35.29876989885227
+    },
+    {
+      "width": 320,
+      "height": 240,
+      "prompt_tokens": 118,
+      "median_ms": 4235.550083001726,
+      "min_ms": 4123.39366699598,
+      "max_ms": 4403.303167004196,
+      "fps": 0.23609684229995032,
+      "ms_per_prompt_token": 35.89449222882819
+    }
+  ]
+}

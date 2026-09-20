@@ -82,31 +82,56 @@ A monitoring stream asks the same small question of every frame. It does not
 need prose, so the typed-decision path above applies directly: one constrained
 readout per frame.
 
-What dominates is the image, not the prompt. A frame becomes image tokens, and
-latency is close to linear in how many:
+What dominates that cost is the image. Measured back to back on one machine,
+answering the same question about the same frame at 448x336:
 
-| frame | image tokens | ms/frame | fps |
+| model | image tokens | ms/frame | resident |
 |---|---:|---:|---:|
-| 1280x960 | 1233 | 13601 | 0.07 |
-| 640x480 | 333 | 3023 | 0.33 |
-| 448x336 | 173 | 1517 | 0.66 |
-| 320x240 | 113 | 967 | 1.03 |
-| 224x168 | 103 | 1048 | 0.95 |
+| MiniCPM-V-4.6-4bit | 63 | 308 | 2.16 GB |
+| Qwen3-VL-4B-Instruct-4bit | ~160 | 772 | 3.10 GB |
+| Qwen3-VL-30B-A3B-Instruct-4bit | ~160 | 1367 | 18.25 GB |
+| Qwen3.8-27B-4bit (dense) | ~165 | 6283 | 16.06 GB |
 
-Measured with Qwen3-VL-4B-Instruct-4bit, median of 3 after warm-up. Cost per
-image token is roughly 9 ms and rises slightly with sequence length, as
-attention should. Below about 320x240 the count stops falling and the floor is
-elsewhere.
+Cost tracks image tokens, and image tokens are an architectural choice rather
+than a resolution one. Qwen-VL emits tokens in proportion to pixels, so its
+per-frame cost rises with resolution: 113 tokens and 493 ms at 320x240, 1233
+tokens and 5850 ms at 1280x960. MiniCPM-V resamples to a fixed budget and
+spends 63 tokens on any frame at 448x336 or below, which is why lowering the
+resolution further buys it nothing at all.
 
-Two consequences worth stating plainly. Caching the text prefix buys little
-here, because the text is a small share of the tokens. And resolution is the
-largest single control available: 1280x960 to 448x336 is 9x, and it is a
-product question — what resolution actually resolves the thing being watched —
-rather than a kernel one.
+That matters for how to spend effort. Degrading resolution is the obvious lever
+and it costs detail. Choosing an architecture that resamples keeps the
+resolution and the speed together.
 
-The next lever is temporal: consecutive frames in a fixed-camera stream are
-nearly identical, so most of them need no inference at all. That work is in
-progress and no number is claimed for it yet.
+Sparsity did not help here. The 30B MoE has roughly 3B active parameters and
+is still slower than the dense 4B, because 30B of weights have to move through
+a 120 GB/s memory system whether or not they are all active, and it needs six
+times the resident memory to do it.
+
+### Skipping frames
+
+A fixed camera produces long runs of near-identical frames. `gate.py` compares
+a 16x16 luminance signature against the last frame that was actually inferred —
+not against the previous frame, or a slow drift walks past the threshold one
+imperceptible step at a time — and skips when it has not moved.
+
+On a 300-frame synthetic sequence with four events of 4 to 12 frames, sensor
+noise and a lighting drift larger than any single event:
+
+| threshold | inferred | skip | event recall | effective ms/frame |
+|---:|---:|---:|---:|---:|
+| 0.002 | 59 | 80.3% | 100% | 61.1 |
+| 0.005 | 27 | 91.0% | 100% | 28.2 |
+| 0.010 | 10 | 96.7% | 0% | 33.9 |
+
+Skip rate alone is a vanity number: 0.010 skips 96.7% and sees nothing. The
+pair is the result. At 0.005, 91% of frames are skipped, no event is missed,
+detection lags by at most 3 frames, and 308 ms per frame becomes 28.2 ms.
+
+A periodic heartbeat turns out to be a staleness bound rather than a detector.
+To be relied on to land inside the shortest event it must be no longer than
+that event, which caps skip at 1 - 1/length on its own and costs more than it
+saves. The threshold does the work.
 
 ## 3. Streamed experts
 

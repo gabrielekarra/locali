@@ -39,8 +39,17 @@ def _load_average() -> float:
     return os.getloadavg()[0]
 
 
+# Every key the processor produced that is not consumed positionally is
+# forwarded. Models differ in what they need — Qwen-VL wants image_grid_thw,
+# MiniCPM-V wants tgt_sizes and image_bound — and a hardcoded allow-list
+# silently drops whatever the next architecture needs. MiniCPM-V failed with
+# "target grid divisible by (2, 2), got (1, 1008)" for exactly that reason:
+# it had been handed pixels with no grid to fold them into.
+_POSITIONAL = {"input_ids", "pixel_values", "attention_mask"}
+
+
 def _forward(model, inputs):
-    extra = {k: v for k, v in inputs.items() if k in ("image_grid_thw", "video_grid_thw")}
+    extra = {k: v for k, v in inputs.items() if k not in _POSITIONAL}
     out = model(
         inputs["input_ids"],
         inputs.get("pixel_values"),
@@ -52,6 +61,31 @@ def _forward(model, inputs):
     return logits
 
 
+def _image_token_count(inputs) -> int | None:
+    """How many of the prompt's tokens the image actually occupies.
+
+    This is the number per-frame cost tracks, and it is not the resolution:
+    architectures that resample to a fixed budget spend far fewer tokens on
+    the same frame than ones whose token count scales with pixels.
+    """
+    bound = inputs.get("image_bound")
+    if bound:
+        try:
+            spans = np.asarray(bound[0])
+            return int((spans[:, 1] - spans[:, 0]).sum())
+        except Exception:
+            return None
+    grid = inputs.get("image_grid_thw")
+    if grid is not None:
+        try:
+            g = np.asarray(grid)
+            merge = 4  # Qwen-VL folds 2x2 patches into one token
+            return int(g.prod(axis=-1).sum() // merge)
+        except Exception:
+            return None
+    return None
+
+
 def main() -> None:
     from mlx_vlm import load
     from mlx_vlm.prompt_utils import apply_chat_template
@@ -60,6 +94,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
     ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--resolutions", default=None,
+                    help="comma-separated WxH list; default sweeps "
+                         + ",".join(f"{w}x{h}" for w, h in RESOLUTIONS))
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
 
@@ -74,7 +111,13 @@ def main() -> None:
     rng = np.random.default_rng(0)
     rows = []
 
-    for width, height in RESOLUTIONS:
+    chosen = RESOLUTIONS
+    if args.resolutions:
+        chosen = tuple(
+            tuple(int(v) for v in part.lower().split("x"))
+            for part in args.resolutions.split(",")
+        )
+    for width, height in chosen:
         frame = Image.fromarray(rng.integers(0, 255, (height, width, 3)).astype(np.uint8))
         inputs = prepare_inputs(
             processor,
@@ -93,13 +136,16 @@ def main() -> None:
             "width": width,
             "height": height,
             "prompt_tokens": int(inputs["input_ids"].shape[1]),
+            "image_tokens": _image_token_count(inputs),
             "median_ms": median,
             "min_ms": min(samples),
             "max_ms": max(samples),
             "fps": 1000 / median,
             "ms_per_prompt_token": median / int(inputs["input_ids"].shape[1]),
         })
+        img_tok = rows[-1]["image_tokens"]
         print(f"{width}x{height:<5d} {rows[-1]['prompt_tokens']:5d} tok "
+              f"({img_tok if img_tok is not None else '?'} img) "
               f"{median:9.1f} ms  {rows[-1]['fps']:5.2f} fps  "
               f"spread {max(samples)/min(samples):.2f}x")
 

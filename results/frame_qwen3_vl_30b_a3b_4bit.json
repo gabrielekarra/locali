@@ -1,0 +1,61 @@
+{
+  "model": ".runtime/models/Qwen3-VL-30B-A3B-Instruct-4bit",
+  "load_seconds": 9.399099415997625,
+  "resident_gb": 18.252606952,
+  "peak_gb": 19.207469589,
+  "reps": 3,
+  "question": "Is there a person in the restricted zone?\nA. no\nB. yes\nAnswer with a single letter:",
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "rows": [
+    {
+      "width": 1280,
+      "height": 960,
+      "prompt_tokens": 1233,
+      "median_ms": 47642.319874998066,
+      "min_ms": 42683.027958999446,
+      "max_ms": 48818.63787500333,
+      "fps": 0.020989741948413895,
+      "ms_per_prompt_token": 38.639351074613195
+    },
+    {
+      "width": 640,
+      "height": 480,
+      "prompt_tokens": 333,
+      "median_ms": 1907.3271669985843,
+      "min_ms": 1803.7301669974113,
+      "max_ms": 2738.8431250001304,
+      "fps": 0.5242939005444063,
+      "ms_per_prompt_token": 5.727709210205959
+    },
+    {
+      "width": 448,
+      "height": 336,
+      "prompt_tokens": 173,
+      "median_ms": 1306.7760839985567,
+      "min_ms": 1118.598082997778,
+      "max_ms": 1365.183124995383,
+      "fps": 0.7652420427990512,
+      "ms_per_prompt_token": 7.553618982650617
+    },
+    {
+      "width": 320,
+      "height": 240,
+      "prompt_tokens": 113,
+      "median_ms": 978.7501250029891,
+      "min_ms": 973.7146249972284,
+      "max_ms": 984.17983300169,
+      "fps": 1.0217112360490845,
+      "ms_per_prompt_token": 8.661505530999904
+    },
+    {
+      "width": 224,
+      "height": 168,
+      "prompt_tokens": 103,
+      "median_ms": 982.9288340042694,
+      "min_ms": 975.7037500021397,
+      "max_ms": 988.9140000013867,
+      "fps": 1.0173676520671244,
+      "ms_per_prompt_token": 9.542998388390966
+    }
+  ]
+}

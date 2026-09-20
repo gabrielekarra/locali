@@ -1,0 +1,69 @@
+{
+  "model": ".runtime/models/MiniCPM-V-4.6-4bit",
+  "load_average_before": 3.3857421875,
+  "load_average_after": 3.21923828125,
+  "quiet_machine": false,
+  "load_seconds": 0.8408660420027445,
+  "resident_gb": 2.158407016,
+  "peak_gb": 2.944952152,
+  "reps": 3,
+  "question": "Is there a person in the restricted zone?\nA. no\nB. yes\nAnswer with a single letter:",
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "rows": [
+    {
+      "width": 1280,
+      "height": 960,
+      "prompt_tokens": 500,
+      "image_tokens": 447,
+      "median_ms": 1978.6290420015575,
+      "min_ms": 1955.8103339950321,
+      "max_ms": 2006.9368749973364,
+      "fps": 0.5054004458503307,
+      "ms_per_prompt_token": 3.957258084003115
+    },
+    {
+      "width": 640,
+      "height": 480,
+      "prompt_tokens": 247,
+      "image_tokens": 203,
+      "median_ms": 939.6766249992652,
+      "min_ms": 937.6361670001643,
+      "max_ms": 955.3609170034179,
+      "fps": 1.0641958876020587,
+      "ms_per_prompt_token": 3.804358805665041
+    },
+    {
+      "width": 448,
+      "height": 336,
+      "prompt_tokens": 103,
+      "image_tokens": 63,
+      "median_ms": 307.9212080047,
+      "min_ms": 307.04358300135937,
+      "max_ms": 313.11104099586373,
+      "fps": 3.2475840377475276,
+      "ms_per_prompt_token": 2.9895262913077674
+    },
+    {
+      "width": 320,
+      "height": 240,
+      "prompt_tokens": 103,
+      "image_tokens": 63,
+      "median_ms": 314.65383299655514,
+      "min_ms": 314.52675000036834,
+      "max_ms": 316.77595899964217,
+      "fps": 3.1780957202289923,
+      "ms_per_prompt_token": 3.0548915824908267
+    },
+    {
+      "width": 224,
+      "height": 168,
+      "prompt_tokens": 103,
+      "image_tokens": 63,
+      "median_ms": 317.2022090002429,
+      "min_ms": 314.6468749982887,
+      "max_ms": 322.43204199767206,
+      "fps": 3.152563165155115,
+      "ms_per_prompt_token": 3.0796330970897365
+    }
+  ]
+}
