@@ -290,3 +290,27 @@ def test_cascade_with_real_engines_smoke():
     assert result.decision.value in question.options
     assert isinstance(result.escalated, bool)
     assert 0.0 <= result.decision.confidence <= 1.0
+
+
+def test_a_cascade_with_no_strong_tier_defers_instead_of_escalating():
+    """Deferring to a person is a terminal action, not a degraded one.
+
+    No resident model measured here is a distinguishably better strong tier
+    than the fast one, so a cascade whose strong tier is a bigger local model
+    pays latency for nothing. Confidence still buys coverage.
+    """
+    engine = _engine_for(0.30, 0.28, 0.42, tag="fast")   # confidence ~0.52
+    out = Cascade(engine, None, confidence_floor=0.6, schema_mass_floor=0.5).decide(
+        "irrelevant state", _QUESTION
+    )
+    assert out.escalated and out.deferred
+    assert out.strong_decision is None
+    assert out.decision is out.fast_decision  # carried for review, not to act on
+
+
+def test_a_confident_answer_is_never_deferred():
+    engine = _engine_for(0.90, 0.05, 0.05, tag="fast")   # confidence ~0.95
+    out = Cascade(engine, None, confidence_floor=0.6, schema_mass_floor=0.5).decide(
+        "irrelevant state", _QUESTION
+    )
+    assert not out.escalated and not out.deferred

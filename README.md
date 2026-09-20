@@ -75,12 +75,35 @@ roughly 654 fixture records against the present 181. Until then, picking a
 model off this table by its rank is reading noise. Read it for the spread, for
 schema mass, and for latency, which differ by far more than the accuracies do.
 
-`separation` is mean confidence when correct minus mean confidence when wrong.
-It decides whether a confidence threshold can gate anything, and at 0.12 to
-0.31 it is too weak to build an escalation cascade on. That is the open
-problem, and it sits ahead of any further latency work: a monitoring system
-that alerts on a confidence threshold is worth nothing if the confidence does
-not separate.
+`separation` is mean confidence when correct minus mean confidence when wrong,
+and it decides whether a confidence threshold can gate anything. Unlike the
+accuracies, it is resolvable on this sample: Llama-3.2-3B measures +0.174 with
+an interval of [+0.102, +0.254] against Qwen3-4B's +0.055, [+0.005, +0.116].
+That reverses the practical choice. Llama-3.2-3B has lower accuracy by an
+amount the data cannot confirm, and better separation by an amount it can.
+
+### What the confidence is worth
+
+A second, bigger local tier is not: no resident checkpoint here is a
+distinguishably better strong tier than Llama-3.2-3B — Qwen3-4B +0.083
+(p = 0.164), Qwen3-8B +0.056 (p = 0.306), Llama-3.1-8B -0.028 (p = 0.660) —
+while the 8B models cost three times the latency. Escalating to a bigger model
+buys an improvement the sample cannot detect.
+
+What the confidence buys is coverage. Acting only above a floor and sending
+the rest to a person (`bench_abstain.py`, temperature-calibrated):
+
+| floor | acts on | accuracy when it acts | 95% interval | to a person |
+|---:|---:|---:|---:|---:|
+| none | 100% | 0.569 | [0.458, 0.681] | 0% |
+| 0.50 | 69.4% | 0.720 | [0.600, 0.840] | 30.6% |
+| 0.60 | 55.6% | 0.800 | [0.675, 0.925] | 44.4% |
+| 0.70 | 43.1% | 0.806 | [0.677, 0.935] | 56.9% |
+
+That is the product decision: pick the error rate you can live with, read off
+how much reaches a person. It needs no second model. The intervals widen as
+coverage falls — at a 0.9 floor only seven rows remain — so the far end of the
+curve is indicative, not settled.
 
 `schema_mass` is worth reading beside accuracy. Qwen3-0.6B puts 0.264 of its
 probability on a valid option and renormalization hides the rest, so its

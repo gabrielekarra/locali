@@ -1,6 +1,18 @@
 """Two-tier decision cascade: a fast resident model answers; when its
-confidence or schema_mass falls below a floor, the same question is
-escalated to a stronger model and its answer is returned instead.
+confidence or schema_mass falls below a floor, the question is escalated.
+
+The strong tier may be another engine, or it may be `None`, which means defer
+to a person. Deferral is a real terminal action, not a degraded one: measured
+on this repository's fixture, no resident model is a distinguishably better
+strong tier than Llama-3.2-3B (Qwen3-4B +0.083 p=0.164, Qwen3-8B +0.056
+p=0.306, Llama-3.1-8B -0.028 p=0.660), while the 8B models cost three times
+the latency. Escalating to a bigger local model would buy an improvement the
+data cannot detect, at triple the cost.
+
+What the confidence does buy is coverage. Temperature-calibrated
+Llama-3.2-3B, acting only above a 0.6 confidence floor, answers 55.6% of
+cases at 0.800 accuracy against 0.569 for answering everything, and sends the
+rest to a person. That trade needs no second model.
 
 Cost model: average latency is (fast tier, always) + (strong tier, only when
 escalated) - not an idealized p_escalate*strong + (1-p_escalate)*fast, which
@@ -55,13 +67,16 @@ class CascadeDecision:
     # batch's total wall time divided evenly across its questions (exact for
     # the common single-question case, an approximation for K>1).
     total_latency_ms: float
+    # True when escalation fired with no strong tier configured: the fast
+    # answer is carried for reference, but the caller must not act on it.
+    deferred: bool = False
 
 
 class Cascade:
     def __init__(
         self,
         fast: Engine,
-        strong: Engine,
+        strong: Engine | None,
         *,
         confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
         schema_mass_floor: float = DEFAULT_SCHEMA_MASS_FLOOR,
@@ -122,7 +137,20 @@ class Cascade:
 
         results: list[CascadeDecision | None] = [None] * len(questions)
         escalated_idx = [i for i, flag in enumerate(escalate) if flag]
-        if escalated_idx:
+        if escalated_idx and self.strong is None:
+            # No strong tier: the question goes to a person. The fast answer
+            # is carried for reference so a reviewer sees what the model
+            # thought, but `deferred` says not to act on it.
+            for i in escalated_idx:
+                results[i] = CascadeDecision(
+                    decision=fast_decisions[i],
+                    escalated=True,
+                    deferred=True,
+                    fast_decision=fast_decisions[i],
+                    strong_decision=None,
+                    total_latency_ms=fast_share_ms,
+                )
+        elif escalated_idx:
             # Batched: every escalated question forks off one shared strong-tier
             # state pass, same as decide_many does for the fast tier.
             escalated_questions = [questions[i] for i in escalated_idx]

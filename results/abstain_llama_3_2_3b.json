@@ -1,0 +1,78 @@
+{
+  "source": "results/calibration_llama_3_2_3b_instruct_4bit.json",
+  "engine": ".runtime/models/Llama-3.2-3B-Instruct-4bit",
+  "calibrator": "temperature",
+  "n_test_rows": 72,
+  "rows": [
+    {
+      "confidence_floor": 0.0,
+      "coverage": 1.0,
+      "n_acted": 72,
+      "accuracy": 0.5694444444444444,
+      "accuracy_ci95": [
+        0.4583333333333333,
+        0.6805555555555556
+      ]
+    },
+    {
+      "confidence_floor": 0.4,
+      "coverage": 0.8194444444444444,
+      "n_acted": 59,
+      "accuracy": 0.6779661016949152,
+      "accuracy_ci95": [
+        0.559322033898305,
+        0.7966101694915254
+      ]
+    },
+    {
+      "confidence_floor": 0.5,
+      "coverage": 0.6944444444444444,
+      "n_acted": 50,
+      "accuracy": 0.72,
+      "accuracy_ci95": [
+        0.6,
+        0.84
+      ]
+    },
+    {
+      "confidence_floor": 0.6,
+      "coverage": 0.5555555555555556,
+      "n_acted": 40,
+      "accuracy": 0.8,
+      "accuracy_ci95": [
+        0.675,
+        0.925
+      ]
+    },
+    {
+      "confidence_floor": 0.7,
+      "coverage": 0.4305555555555556,
+      "n_acted": 31,
+      "accuracy": 0.8064516129032258,
+      "accuracy_ci95": [
+        0.6774193548387096,
+        0.9354838709677419
+      ]
+    },
+    {
+      "confidence_floor": 0.8,
+      "coverage": 0.2222222222222222,
+      "n_acted": 16,
+      "accuracy": 0.875,
+      "accuracy_ci95": [
+        0.6875,
+        1.0
+      ]
+    },
+    {
+      "confidence_floor": 0.9,
+      "coverage": 0.09722222222222222,
+      "n_acted": 7,
+      "accuracy": 0.8571428571428571,
+      "accuracy_ci95": [
+        0.5714285714285714,
+        1.0
+      ]
+    }
+  ]
+}
