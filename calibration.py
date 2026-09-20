@@ -393,3 +393,62 @@ class IsotonicBinary(Calibrator):
             x_knots=np.array(data["x_knots"], dtype=np.float64),
             y_knots=np.array(data["y_knots"], dtype=np.float64),
         )
+
+
+def bootstrap_ci(metric, probs, labels, *, resamples=2000, alpha=0.05, seed=0):
+    """Percentile bootstrap interval for any of the metrics above.
+
+    Point estimates on a hundred-odd rows invite conclusions the sample cannot
+    support: a 0.65 and a 0.57 accuracy over 72 test rows are not obviously
+    different, and a table of bare numbers hides that. `metric` is any callable
+    taking `(probs, labels)`.
+    """
+    probs = np.asarray(probs, dtype=np.float64)
+    labels = np.asarray(labels)
+    n = len(labels)
+    if n == 0:
+        raise ValueError("cannot bootstrap an empty sample")
+    rng = np.random.default_rng(seed)
+    draws = np.empty(resamples, dtype=np.float64)
+    for i in range(resamples):
+        idx = rng.integers(0, n, size=n)
+        draws[i] = metric(probs[idx], labels[idx])
+    lo, hi = np.quantile(draws, [alpha / 2, 1 - alpha / 2])
+    return float(lo), float(hi)
+
+
+def paired_bootstrap(metric, probs_a, probs_b, labels, *, resamples=2000, seed=0):
+    """Compare two systems on the same rows, resampling the rows they share.
+
+    Paired because both systems answered the same cases: resampling them
+    independently would throw away that pairing and widen the interval for no
+    reason. Returns the observed difference (a minus b), its interval, and the
+    two-sided fraction of resamples whose difference crosses zero — which is a
+    bootstrap p-value, not a t-test, and should be read as such.
+    """
+    probs_a = np.asarray(probs_a, dtype=np.float64)
+    probs_b = np.asarray(probs_b, dtype=np.float64)
+    labels = np.asarray(labels)
+    if len(probs_a) != len(probs_b) or len(probs_a) != len(labels):
+        raise ValueError("paired comparison needs the same rows for both systems")
+    n = len(labels)
+    observed = metric(probs_a, labels) - metric(probs_b, labels)
+    rng = np.random.default_rng(seed)
+    diffs = np.empty(resamples, dtype=np.float64)
+    for i in range(resamples):
+        idx = rng.integers(0, n, size=n)
+        diffs[i] = metric(probs_a[idx], labels[idx]) - metric(probs_b[idx], labels[idx])
+    lo, hi = np.quantile(diffs, [0.025, 0.975])
+    crossings = float(np.mean(diffs <= 0) if observed > 0 else np.mean(diffs >= 0))
+    return {
+        "difference": float(observed),
+        "ci_low": float(lo),
+        "ci_high": float(hi),
+        "p_value": min(1.0, 2 * crossings),
+        "resamples": resamples,
+    }
+
+
+def accuracy(probs, labels) -> float:
+    probs = np.asarray(probs, dtype=np.float64)
+    return float((probs.argmax(axis=1) == np.asarray(labels)).mean())

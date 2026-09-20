@@ -350,6 +350,8 @@ def main() -> None:
     parser.add_argument("--stub-seed", type=int, default=0)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--bins", type=int, default=15)
+    parser.add_argument("--resamples", type=int, default=2000,
+                        help="bootstrap resamples behind the reported intervals")
     parser.add_argument("--out", type=Path)
     parser.add_argument(
         "--save-calibrators",
@@ -424,6 +426,7 @@ def main() -> None:
         }
 
     # overall + per-difficulty pooled metrics (mixed-k, via zero-padding)
+    saved_rows: dict[str, list] = {}
     overall_out = {}
     by_difficulty_out = {d: {} for d in DIFFICULTIES}
     for name in CALIBRATOR_FACTORIES:
@@ -432,6 +435,21 @@ def main() -> None:
         all_difficulty = np.array(pooled[name]["difficulty"])
 
         overall_out[name] = metrics_for(all_probs, all_labels, args.bins)
+        # Point estimates over ~70 test rows invite rankings the sample cannot
+        # support, so every pooled metric carries a bootstrap interval.
+        acc_lo, acc_hi = cal.bootstrap_ci(
+            cal.accuracy, all_probs, all_labels, resamples=args.resamples
+        )
+        ece_lo, ece_hi = cal.bootstrap_ci(
+            lambda p, y: cal.ece(p, y, args.bins),
+            all_probs, all_labels, resamples=args.resamples,
+        )
+        overall_out[name]["accuracy_ci95"] = [acc_lo, acc_hi]
+        overall_out[name]["ece_ci95"] = [ece_lo, ece_hi]
+        if name == "raw":
+            saved_rows["probs"] = all_probs.tolist()
+            saved_rows["labels"] = all_labels.tolist()
+            saved_rows["difficulty"] = all_difficulty.tolist()
         for difficulty in DIFFICULTIES:
             mask = all_difficulty == difficulty
             if not mask.any():
@@ -459,6 +477,9 @@ def main() -> None:
         },
         "families": families_out,
         "overall": overall_out,
+        # Kept so two models can be compared on the rows they both answered,
+        # rather than by eyeballing two point estimates.
+        "test_rows": saved_rows,
         "by_difficulty": by_difficulty_out,
         "meta": {
             "python": platform.python_version(),
